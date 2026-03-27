@@ -11,6 +11,13 @@
 
 ## Минимальный набор для production
 
+Для GitLab CI deploy-джобов отдельно нужны secret variables:
+
+| Переменная | Откуда взять |
+|---|---|
+| `EXTG_TEST_ENV_FILE` | полный содержимый `.env.prod` для test-контура, положить в GitLab CI/CD Variables |
+| `EXTG_PROD_ENV_FILE` | полный содержимый `.env.prod` для production-контура, положить в GitLab CI/CD Variables |
+
 ### 1. Compose / deploy
 
 | Переменная | Откуда взять |

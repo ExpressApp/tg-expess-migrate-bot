@@ -123,6 +123,13 @@ curl -i http://127.0.0.1:8000/health
 - [docker-compose.prod.yml](/Users/aleksandrosovskii/exTG/docker-compose.prod.yml)
 - [.gitlab-ci.yml](/Users/aleksandrosovskii/exTG/.gitlab-ci.yml)
 
+GitLab CI теперь поддерживает два manual deploy-контура:
+
+- `deploy-test` читает secret variable `EXTG_TEST_ENV_FILE`;
+- `deploy-prod` читает secret variable `EXTG_PROD_ENV_FILE`.
+
+В обе переменные нужно положить полное содержимое runtime `.env.prod` для соответствующего контура.
+
 Что поднимается:
 
 - `postgres`

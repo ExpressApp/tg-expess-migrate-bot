@@ -88,6 +88,14 @@ test-image-build:
     - docker build --pull -t extg-services:test-ci .
     - docker image inspect extg-services:test-ci >/dev/null
 
+.deploy_stack: &deploy_stack
+  - docker compose --env-file .env.prod -f docker-compose.prod.yml pull
+  - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d postgres kafka
+  - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm create-topics
+  - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
+  - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d telethon-service worker bot
+  - docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+
 build-image:
   image: docker:27
   stage: build
@@ -107,13 +115,53 @@ build-image:
   rules:
     - if: '$CI_COMMIT_BRANCH'
 
+deploy-test:
+  image: docker:27
+  stage: deploy
+  tags:
+    - bts-dev-bots
+  needs:
+    - build-image
+  before_script:
+    - *set_env_vars
+    - *login_registry
+    - test -n "${EXTG_TEST_ENV_FILE:-}" || (echo "EXTG_TEST_ENV_FILE is required" && exit 1)
+    - printf '%s\n' "${EXTG_TEST_ENV_FILE}" > .env.prod
+  script: *deploy_stack
+  environment:
+    name: test
+    on_stop: deploy-test-stop
+  resource_group: test
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+      when: manual
+
+deploy-test-stop:
+  image: docker:27
+  stage: deploy
+  tags:
+    - bts-dev-bots
+  before_script:
+    - *set_env_vars
+    - test -n "${EXTG_TEST_ENV_FILE:-}" || (echo "EXTG_TEST_ENV_FILE is required" && exit 1)
+    - printf '%s\n' "${EXTG_TEST_ENV_FILE}" > .env.prod
+  script:
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml down -v --remove-orphans
+  environment:
+    name: test
+    action: stop
+  resource_group: test
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+      when: manual
+
 deploy-prod:
   # Assumes a runner with access to the target Docker engine
   # (shell executor or docker socket on the deployment host).
   image: docker:27
   stage: deploy
   tags:
-    - docker
+    - botsprod-yac
   needs:
     - build-image
   before_script:
@@ -121,13 +169,7 @@ deploy-prod:
     - *login_registry
     - test -n "${EXTG_PROD_ENV_FILE:-}" || (echo "EXTG_PROD_ENV_FILE is required" && exit 1)
     - printf '%s\n' "${EXTG_PROD_ENV_FILE}" > .env.prod
-  script:
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml pull
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d postgres kafka
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm create-topics
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d telethon-service worker bot
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+  script: *deploy_stack
   environment:
     name: production
   resource_group: production
