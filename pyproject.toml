@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "extg-services"
+version = "0.1.0"
+description = "Telegram to eXpress migration service"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.14,<2",
+  "asyncpg>=0.30,<1",
+  "cryptography>=45,<46",
+  "dependency-injector>=4.44,<5",
+  "confluent-kafka>=2.13,<3",
+  "fastapi>=0.116,<1",
+  "greenlet>=3.1,<4",
+  "openpyxl>=3.1,<4",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.8,<3",
+  "pybotx>=0.76,<0.77",
+  "pybotx-fsm>=0.7.1,<0.8",
+  "SQLAlchemy>=2.0,<3",
+  "structlog>=24.4,<26",
+  "telethon>=1.42,<2",
+  "uvicorn>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.23,<0.24",
+]
+
+[project.scripts]
+extg-bot = "extg_bot_ui.bootstrap.main:main"
+extg-telethon-service = "extg_telethon_service.bootstrap.main:main"
+extg-worker = "extg_migration_runtime.bootstrap.main:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src", "."]

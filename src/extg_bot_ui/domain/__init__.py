@@ -1,0 +1,2 @@
+"""Bot UI domain layer."""
+

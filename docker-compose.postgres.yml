@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: extg_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: extg
+      POSTGRES_USER: extg
+      POSTGRES_PASSWORD: extg
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./tmp/postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "extg", "-d", "extg"]
+      retries: 5
+      interval: 5s
+      timeout: 5s

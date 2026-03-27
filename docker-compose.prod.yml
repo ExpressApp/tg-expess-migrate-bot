@@ -1,0 +1,177 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-extg}-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-extg}
+      POSTGRES_USER: ${POSTGRES_USER:-extg}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-extg} -d ${POSTGRES_DB:-extg}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: &default_logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "10"
+
+  kafka:
+    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
+    container_name: ${COMPOSE_PROJECT_NAME:-extg}-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_CONTROLLER_BROKER_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:9094
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    ports:
+      - "${KAFKA_EXTERNAL_PORT:-9094}:9094"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "kafka-broker-api-versions.sh --bootstrap-server localhost:9094 || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    logging: *default_logging
+
+  create-topics:
+    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
+    container_name: ${COMPOSE_PROJECT_NAME:-extg}-create-topics
+    restart: "no"
+    env_file:
+      - .env.prod
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        kafka-topics.sh --create --topic "$${EXTG_KAFKA__COMMAND_TOPIC}" \
+          --partitions "$${EXTG_KAFKA_TOPIC_PARTITIONS:-10}" \
+          --replication-factor 1 --bootstrap-server kafka:9092 --if-not-exists
+        kafka-topics.sh --create --topic "$${EXTG_KAFKA__RESULT_TOPIC}" \
+          --partitions "$${EXTG_KAFKA_TOPIC_PARTITIONS:-10}" \
+          --replication-factor 1 --bootstrap-server kafka:9092 --if-not-exists
+        kafka-topics.sh --create --topic "$${EXTG_KAFKA__DLQ_TOPIC}" \
+          --partitions "$${EXTG_KAFKA_TOPIC_PARTITIONS:-10}" \
+          --replication-factor 1 --bootstrap-server kafka:9092 --if-not-exists
+    logging: *default_logging
+
+  migrate:
+    image: ${EXTG_IMAGE:?set EXTG_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-extg}-migrate
+    restart: "no"
+    env_file:
+      - .env.prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    logging: *default_logging
+
+  telethon-service:
+    image: ${EXTG_IMAGE:?set EXTG_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-extg}-telethon-service
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      EXTG_RUNTIME_ROLE: telethon_service
+      EXTG_TELETHON_SERVICE__HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8092"
+    command: ["extg-telethon-service"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8092/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default_logging
+    ulimits: &default_ulimits
+      nproc: 65535
+      nofile:
+        soft: 20000
+        hard: 40000
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    image: ${EXTG_IMAGE:?set EXTG_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-extg}-worker
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      telethon-service:
+        condition: service_healthy
+    command: ["extg-worker"]
+    volumes:
+      - archive_imports:/tmp/extg-archive-imports
+    logging: *default_logging
+    ulimits: *default_ulimits
+    security_opt:
+      - no-new-privileges:true
+
+  bot:
+    image: ${EXTG_IMAGE:?set EXTG_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME:-extg}-bot
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      EXTG_BOT__HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      telethon-service:
+        condition: service_healthy
+    command: ["extg-bot"]
+    ports:
+      - "${EXTG_BOT_PUBLISHED_PORT:-8000}:8000"
+    volumes:
+      - archive_imports:/tmp/extg-archive-imports
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      traefik.enable: "${TRAEFIK_ENABLED:-false}"
+      traefik.http.routers.extg-bot.rule: "Host(`${TRAEFIK_BOT_HOST:-example.invalid}`)"
+      traefik.http.services.extg-bot.loadbalancer.server.port: "8000"
+    logging: *default_logging
+    ulimits: *default_ulimits
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  kafka_data:
+  archive_imports:

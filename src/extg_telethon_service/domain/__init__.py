@@ -1,0 +1,2 @@
+"""Telethon integration domain layer."""
+

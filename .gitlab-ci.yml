@@ -1,0 +1,111 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  GIT_DEPTH: "1"
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
+  DOCKER_TLS_CERTDIR: "/certs"
+
+.set_backend_version: &set_backend_version
+  - BACKEND_VERSION=$(grep -m 1 '^version = ' pyproject.toml | tr -d '"' | cut -d' ' -f3)
+  - echo "$BACKEND_VERSION"
+
+.set_env_vars: &set_env_vars
+  - if [ -z "${BOT_PROJECT_NAME:-}" ]; then BOT_PROJECT_NAME="${CI_PROJECT_PATH_SLUG}"; fi
+  - export COMPOSE_PROJECT_NAME="${BOT_PROJECT_NAME}"
+  - export EXTG_IMAGE="${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
+
+.login_registry: &login_registry
+  - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
+
+default:
+  interruptible: true
+
+test:
+  image: python:3.14-slim
+  stage: test
+  tags:
+    - docker
+  cache:
+    key:
+      files:
+        - uv.lock
+    paths:
+      - .cache/uv
+  services:
+    - name: postgres:15-alpine
+      alias: postgres
+      variables:
+        POSTGRES_DB: extg
+        POSTGRES_USER: extg
+        POSTGRES_PASSWORD: extg
+  variables:
+    EXTG_POSTGRES__DSN: postgresql+asyncpg://extg:extg@postgres:5432/extg
+    EXTG_SECURITY__MESSAGE_HMAC_SECRET: test-secret
+    EXTG_SECURITY__TELEGRAM_SESSION_MASTER_KEY: test-master-key
+    EXTG_SECURITY__TELEGRAM_SESSION_KEY_VERSION: v1
+    EXTG_TELEGRAM__API_ID: "123456"
+    EXTG_TELEGRAM__API_HASH: test-api-hash
+    EXTG_TELETHON_SERVICE__INTERNAL_TOKEN: test-internal-token
+    EXTG_EXPRESS__BOT_ID: 00000000-0000-0000-0000-000000000001
+    EXTG_EXPRESS__CTS_URL: https://cts.example.test
+    EXTG_EXPRESS__SECRET_KEY: test-secret
+    EXTG_BOT__MIGRATION_ID: tg_to_express_bot_managed
+    EXTG_BOT__OPERATOR_HUIDS: 00000000-0000-0000-0000-000000000000
+    EXTG_BOT__VERIFY_REQUESTS: "false"
+    EXTG_KAFKA__ENABLED: "false"
+  before_script:
+    - python -m pip install --upgrade pip uv
+    - uv sync --frozen --extra dev
+  script:
+    - uv run python -m compileall src tests migrations
+    - uv run pytest -q -p no:cacheprovider
+
+build-image:
+  image: docker:27
+  stage: build
+  tags:
+    - docker
+  services:
+    - docker:27-dind
+  before_script:
+    - *set_backend_version
+    - *set_env_vars
+    - *login_registry
+  script:
+    - docker build --pull -t "${EXTG_IMAGE}" .
+    - docker push "${EXTG_IMAGE}"
+    - docker tag "${EXTG_IMAGE}" "${CI_REGISTRY_IMAGE}:latest"
+    - docker push "${CI_REGISTRY_IMAGE}:latest"
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+
+deploy-prod:
+  # Assumes a runner with access to the target Docker engine
+  # (shell executor or docker socket on the deployment host).
+  image: docker:27
+  stage: deploy
+  tags:
+    - docker
+  needs:
+    - build-image
+  before_script:
+    - *set_env_vars
+    - *login_registry
+    - test -n "${EXTG_PROD_ENV_FILE:-}" || (echo "EXTG_PROD_ENV_FILE is required" && exit 1)
+    - printf '%s\n' "${EXTG_PROD_ENV_FILE}" > .env.prod
+  script:
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml pull
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d postgres kafka
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm create-topics
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d telethon-service worker bot
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+  environment:
+    name: production
+  resource_group: production
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual

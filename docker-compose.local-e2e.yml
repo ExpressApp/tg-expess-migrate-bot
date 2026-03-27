@@ -1,0 +1,115 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: extg_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: extg
+      POSTGRES_USER: extg
+      POSTGRES_PASSWORD: extg
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./tmp/postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "extg", "-d", "extg"]
+      retries: 10
+      interval: 5s
+      timeout: 5s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: extg-services:local
+    restart: "no"
+    env_file:
+      - .env.e2e
+    environment:
+      EXTG_POSTGRES__DSN: postgresql+asyncpg://extg:extg@postgres:5432/extg
+      EXTG_TELETHON_SERVICE__BASE_URL: http://telethon-service:8092
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  telethon-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: extg-services:local
+    restart: unless-stopped
+    env_file:
+      - .env.e2e
+    environment:
+      EXTG_POSTGRES__DSN: postgresql+asyncpg://extg:extg@postgres:5432/extg
+      EXTG_TELETHON_SERVICE__BASE_URL: http://telethon-service:8092
+      EXTG_TELETHON_SERVICE__HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["extg-telethon-service"]
+    expose:
+      - "8092"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8092/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: extg-services:local
+    restart: unless-stopped
+    env_file:
+      - .env.e2e
+    environment:
+      EXTG_POSTGRES__DSN: postgresql+asyncpg://extg:extg@postgres:5432/extg
+      EXTG_TELETHON_SERVICE__BASE_URL: http://telethon-service:8092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      telethon-service:
+        condition: service_healthy
+    volumes:
+      - archive-imports:/tmp/extg-archive-imports
+    command: ["extg-worker"]
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: extg-services:local
+    restart: unless-stopped
+    env_file:
+      - .env.e2e
+    environment:
+      EXTG_POSTGRES__DSN: postgresql+asyncpg://extg:extg@postgres:5432/extg
+      EXTG_TELETHON_SERVICE__BASE_URL: http://telethon-service:8092
+      EXTG_BOT__HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      telethon-service:
+        condition: service_healthy
+    volumes:
+      - archive-imports:/tmp/extg-archive-imports
+    command: ["extg-bot"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  archive-imports:

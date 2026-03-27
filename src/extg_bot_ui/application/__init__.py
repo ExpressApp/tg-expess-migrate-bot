@@ -1,0 +1,2 @@
+"""Bot UI application layer."""
+
