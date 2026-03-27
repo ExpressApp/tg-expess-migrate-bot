@@ -23,7 +23,7 @@ variables:
 default:
   interruptible: true
 
-test:
+.python_test_base: &python_test_base
   image: python:3.14-slim
   stage: test
   tags:
@@ -59,9 +59,34 @@ test:
   before_script:
     - python -m pip install --upgrade pip uv
     - uv sync --frozen --extra dev
+
+test-runtime:
+  <<: *python_test_base
   script:
     - uv run python -m compileall src tests migrations
     - uv run pytest -q -p no:cacheprovider
+
+test-migrations:
+  <<: *python_test_base
+  script:
+    - uv run alembic upgrade head
+    - uv run alembic current
+    - uv run alembic check
+    - uv run alembic upgrade head --sql > /tmp/alembic-upgrade-head.sql
+
+test-image-build:
+  image: docker:27
+  stage: test
+  tags:
+    - docker
+  services:
+    - docker:27-dind
+  before_script:
+    - cp .env.prod.example .env.prod
+    - docker compose --env-file .env.prod -f docker-compose.prod.yml config >/tmp/docker-compose.prod.rendered.yml
+  script:
+    - docker build --pull -t extg-services:test-ci .
+    - docker image inspect extg-services:test-ci >/dev/null
 
 build-image:
   image: docker:27

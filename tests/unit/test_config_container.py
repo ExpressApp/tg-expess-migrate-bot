@@ -86,7 +86,10 @@ def test_bot_ui_settings_require_postgres_dsn_outside_local_and_test():
         )
 
 
-def test_bot_ui_settings_require_message_hmac_secret_outside_local_and_test():
+def test_bot_ui_settings_require_message_hmac_secret_outside_local_and_test(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("EXTG_SECURITY__MESSAGE_HMAC_SECRET", raising=False)
     with pytest.raises(
         ConfigurationError,
         match="EXTG_SECURITY__MESSAGE_HMAC_SECRET is required when EXTG_ENVIRONMENT is not local/test",
@@ -147,7 +150,10 @@ def test_migration_runtime_settings_require_bootstrap_servers_when_kafka_enabled
         )
 
 
-def test_bot_ui_settings_require_migration_id() -> None:
+def test_bot_ui_settings_require_migration_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXTG_BOT__MIGRATION_ID", raising=False)
     with pytest.raises(
         ConfigurationError,
         match="EXTG_BOT__MIGRATION_ID is required for bot-ui runtime",
@@ -158,7 +164,10 @@ def test_bot_ui_settings_require_migration_id() -> None:
         )
 
 
-def test_migration_runtime_settings_require_migration_id() -> None:
+def test_migration_runtime_settings_require_migration_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXTG_BOT__MIGRATION_ID", raising=False)
     with pytest.raises(
         ConfigurationError,
         match="EXTG_BOT__MIGRATION_ID is required for migration-runtime",

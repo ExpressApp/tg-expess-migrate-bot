@@ -5,8 +5,11 @@ from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
 import extg_bot_ui.presentation.bot.app as bot_app_module
+from dependency_injector import providers
 from extg_bot_ui.bootstrap.container import BotUiContainer
+from extg_bot_ui.bootstrap.config import BotUiSettings
 from extg_bot_ui.presentation.bot.app import create_bot_app
+from extg_shared.config.common import BotSettings, ExpressSettings, PostgresSettings
 from extg_shared.utils.express_routing import get_current_express_cts_host
 
 
@@ -208,15 +211,27 @@ def test_create_bot_app_ignores_events_from_unconfigured_bot_id(monkeypatch):
 def test_create_bot_app_learns_bot_huid_from_bot_originated_system_event(monkeypatch):
     monkeypatch.setenv("EXTG_ENVIRONMENT", "test")
     monkeypatch.setenv("EXTG_BOT__MIGRATION_ID", "migration-bot")
-    monkeypatch.setenv(
-        "EXTG_EXPRESS__ACCOUNTS",
-        (
-            '[{"role":"primary","bot_id":"00000000-0000-0000-0000-000000000001",'
-            '"cts_url":"https://cts-main.example.test","secret_key":"primary-secret"}]'
-        ),
-    )
 
     container = BotUiContainer()
+    container.settings.override(
+        providers.Object(
+            BotUiSettings(
+                environment="test",
+                postgres=PostgresSettings(),
+                bot=BotSettings(migration_id="migration-bot"),
+                express=ExpressSettings(
+                    accounts=[
+                        {
+                            "role": "primary",
+                            "bot_id": "00000000-0000-0000-0000-000000000001",
+                            "cts_url": "https://cts-main.example.test",
+                            "secret_key": "primary-secret",
+                        },
+                    ],
+                ),
+            ),
+        ),
+    )
     repository = container.express_bot_huid_binding_repository()
     app = create_bot_app(container, bot=FakeBot())
 
