@@ -53,6 +53,14 @@
   - export DLQ_TOPIC=${DLQ_TOPIC:-extg.migration.dlq.v1}
   - export TOPIC_PARTITIONS=${TOPIC_PARTITIONS:-10}
 
+.write_runtime_env_from_var: &write_runtime_env_from_var
+  - |
+    if [ -f "${RUNTIME_ENV_SOURCE}" ]; then
+      cp "${RUNTIME_ENV_SOURCE}" .env.runtime
+    else
+      printf '%s\n' "${RUNTIME_ENV_SOURCE}" > .env.runtime
+    fi
+
 .run_backend: &run_backend
   - docker rm -f ${BOT_CONTAINER_NAME} || true
   - docker rm -f ${BOT_WORKER_CONTAINER_NAME} || true
@@ -291,7 +299,8 @@ deploy.botstest:
     - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
     - BOT_URL="${BOT_CONTAINER_NAME}.${DEV_SERVER_HOST}"
     - test -n "${EXTG_TEST_ENV_FILE:-}" || (echo "EXTG_TEST_ENV_FILE is required" && exit 1)
-    - printf '%s\n' "${EXTG_TEST_ENV_FILE}" > .env.runtime
+    - RUNTIME_ENV_SOURCE="${EXTG_TEST_ENV_FILE}"
+    - *write_runtime_env_from_var
     - *extract_runtime_values
   script:
     - echo "Use URL https://${BOT_URL}/ in your cts admin site"
@@ -332,7 +341,8 @@ deploy.botsprod:
     - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
     - BOT_URL="${BOT_CONTAINER_NAME}.${PROD_SERVER_HOST}"
     - test -n "${EXTG_PROD_ENV_FILE:-}" || (echo "EXTG_PROD_ENV_FILE is required" && exit 1)
-    - printf '%s\n' "${EXTG_PROD_ENV_FILE}" > .env.runtime
+    - RUNTIME_ENV_SOURCE="${EXTG_PROD_ENV_FILE}"
+    - *write_runtime_env_from_var
     - *extract_runtime_values
   script:
     - echo "Use URL https://${BOT_URL}/ in your cts admin site"
