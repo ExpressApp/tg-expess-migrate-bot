@@ -1,39 +1,210 @@
-stages:
-  - test
-  - build
-  - deploy
-
-variables:
-  GIT_DEPTH: "1"
-  UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
-  DOCKER_TLS_CERTDIR: "/certs"
-
+# YAML objects named with dot is anchors, which are not recognized as jobs
 .set_backend_version: &set_backend_version
   - BACKEND_VERSION=$(grep -m 1 '^version = ' pyproject.toml | tr -d '"' | cut -d' ' -f3)
-  - echo "$BACKEND_VERSION"
+  - echo ${BACKEND_VERSION}
 
 .set_env_vars: &set_env_vars
-  - if [ -z "${BOT_PROJECT_NAME:-}" ]; then BOT_PROJECT_NAME="${CI_PROJECT_PATH_SLUG}"; fi
-  - export COMPOSE_PROJECT_NAME="${BOT_PROJECT_NAME}"
-  - export EXTG_IMAGE="${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
+  - if [ -z ${BOT_PROJECT_NAME:-} ]; then BOT_PROJECT_NAME=${CI_PROJECT_PATH_SLUG#"$CI_PROJECT_NAMESPACE-"}; fi
+  - BOT_CONTAINER_NAME="${BOT_PROJECT_NAME}"
+  - BOT_WORKER_CONTAINER_NAME="${BOT_CONTAINER_NAME}-worker"
+  - TELETHON_SERVICE_CONTAINER_NAME="${BOT_CONTAINER_NAME}-telethon-service"
+  - MIGRATE_CONTAINER_NAME="${BOT_CONTAINER_NAME}-migrate"
+  - KAFKA_CONTAINER_NAME="${BOT_CONTAINER_NAME}-kafka"
+  - KAFKA_NETWORK_NAME="${BOT_CONTAINER_NAME}-network"
+  - ARCHIVE_IMPORTS_VOLUME_NAME="${BOT_CONTAINER_NAME}-archive-imports"
 
 .login_registry: &login_registry
-  - docker login -u "${CI_REGISTRY_USER}" -p "${CI_REGISTRY_PASSWORD}" "${CI_REGISTRY}"
+  - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+
+.install_dependencies: &install_dependencies
+  - python -m pip install --upgrade pip uv
+  - uv sync --frozen --extra dev
+
+.cache_dependencies: &cache_dependencies
+  key:
+    files:
+      - uv.lock
+    prefix: "uv"
+  paths:
+    - .cache/uv
+    - .venv
+
+.postgres_envs: &postgres_envs
+  - if [ -z ${BOT_PROJECT_NAME:-} ]; then BOT_PROJECT_NAME=${CI_PROJECT_PATH_SLUG#"$CI_PROJECT_NAMESPACE-"}; fi
+  - POSTGRES_USER=${BOT_PROJECT_NAME}
+  - POSTGRES_DB=${BOT_PROJECT_NAME}
+  - POSTGRES_PASSWORD=$(openssl rand -hex 16)
+  - POSTGRES_HOST=${PROD_POSTGRES_HOST}
+  - POSTGRES_DSN=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}/${POSTGRES_DB}
+
+.create_db: &create_db
+  - psql -c "create user \"${POSTGRES_USER}\"" postgres || true
+  - psql -c "alter user \"${POSTGRES_USER}\" with password '${POSTGRES_PASSWORD}'" postgres
+  - psql -c "create database \"${POSTGRES_DB}\" with owner \"${POSTGRES_USER}\"" postgres || true
+  - psql -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" -d "${POSTGRES_DB}"
+
+.extract_runtime_values: &extract_runtime_values
+  - COMMAND_TOPIC=$(awk -F= '/^EXTG_KAFKA__COMMAND_TOPIC=/{print substr($0, index($0, "=") + 1)}' .env.runtime)
+  - RESULT_TOPIC=$(awk -F= '/^EXTG_KAFKA__RESULT_TOPIC=/{print substr($0, index($0, "=") + 1)}' .env.runtime)
+  - DLQ_TOPIC=$(awk -F= '/^EXTG_KAFKA__DLQ_TOPIC=/{print substr($0, index($0, "=") + 1)}' .env.runtime)
+  - TOPIC_PARTITIONS=$(awk -F= '/^EXTG_KAFKA_TOPIC_PARTITIONS=/{print substr($0, index($0, "=") + 1)}' .env.runtime)
+  - export COMMAND_TOPIC=${COMMAND_TOPIC:-extg.migration.command.v1}
+  - export RESULT_TOPIC=${RESULT_TOPIC:-extg.migration.result.v1}
+  - export DLQ_TOPIC=${DLQ_TOPIC:-extg.migration.dlq.v1}
+  - export TOPIC_PARTITIONS=${TOPIC_PARTITIONS:-10}
+
+.run_backend: &run_backend
+  - docker rm -f ${BOT_CONTAINER_NAME} || true
+  - docker rm -f ${BOT_WORKER_CONTAINER_NAME} || true
+  - docker rm -f ${TELETHON_SERVICE_CONTAINER_NAME} || true
+  - docker rm -f ${MIGRATE_CONTAINER_NAME} || true
+  - docker rm -f ${KAFKA_CONTAINER_NAME} || true
+  - docker network create ${KAFKA_NETWORK_NAME} || true
+  - docker volume create ${ARCHIVE_IMPORTS_VOLUME_NAME} || true
+  - echo ${BACKEND_IMAGE_NAME}
+  - docker run
+    -d
+    --memory=2g
+    --cpus=0.5
+    --name ${KAFKA_CONTAINER_NAME}
+    --network "${KAFKA_NETWORK_NAME}"
+    -e KAFKA_CFG_NODE_ID=0
+    -e KAFKA_CFG_CONTROLLER_BROKER_ID=0
+    -e KAFKA_CFG_PROCESS_ROLES=controller,broker
+    -e KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+    -e KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://${KAFKA_CONTAINER_NAME}:9092,EXTERNAL://localhost:9094
+    -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    -e KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@${KAFKA_CONTAINER_NAME}:9093
+    -e KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+    -v ${KAFKA_CONTAINER_NAME}-data:/bitnami/kafka
+    bitnamilegacy/kafka:4.0.0-debian-12-r10
+  - |
+    for i in $(seq 1 20); do
+      if docker exec "${KAFKA_CONTAINER_NAME}" kafka-broker-api-versions.sh --bootstrap-server localhost:9094 >/dev/null 2>&1; then
+        echo "Kafka is ready"
+        break
+      fi
+      echo "Waiting for Kafka ($i/20)"
+      sleep 5
+    done
+  - docker exec ${KAFKA_CONTAINER_NAME} sh -c "
+    kafka-topics.sh --create --topic '${COMMAND_TOPIC}' --partitions '${TOPIC_PARTITIONS}' --replication-factor 1 --bootstrap-server localhost:9094 --if-not-exists &&
+    kafka-topics.sh --create --topic '${RESULT_TOPIC}' --partitions '${TOPIC_PARTITIONS}' --replication-factor 1 --bootstrap-server localhost:9094 --if-not-exists &&
+    kafka-topics.sh --create --topic '${DLQ_TOPIC}' --partitions '${TOPIC_PARTITIONS}' --replication-factor 1 --bootstrap-server localhost:9094 --if-not-exists
+    "
+  - docker pull ${BACKEND_IMAGE_NAME}
+  - docker run
+    --rm
+    --name ${MIGRATE_CONTAINER_NAME}
+    --env-file .env.runtime
+    -e EXTG_POSTGRES__DSN="${POSTGRES_DSN}"
+    ${BACKEND_IMAGE_NAME}
+    alembic upgrade head
+  - docker run
+    -d
+    --memory=1g
+    --cpus=0.5
+    --name ${TELETHON_SERVICE_CONTAINER_NAME}
+    --restart always
+    --log-opt max-size=10m
+    --log-opt max-file=5
+    --env-file .env.runtime
+    -e EXTG_POSTGRES__DSN="${POSTGRES_DSN}"
+    -e EXTG_TELETHON_SERVICE__HOST=0.0.0.0
+    ${BACKEND_IMAGE_NAME}
+    extg-telethon-service
+  - docker network connect ${KAFKA_NETWORK_NAME} ${TELETHON_SERVICE_CONTAINER_NAME}
+  - |
+    for i in $(seq 1 20); do
+      if docker exec "${TELETHON_SERVICE_CONTAINER_NAME}" curl -fsS http://127.0.0.1:8092/health >/dev/null 2>&1; then
+        echo "telethon-service is ready"
+        break
+      fi
+      echo "Waiting for telethon-service ($i/20)"
+      sleep 3
+    done
+  - docker run
+    -d
+    --memory=2g
+    --cpus=0.5
+    --name ${BOT_CONTAINER_NAME}
+    --restart always
+    --label traefik.http.routers.${BOT_CONTAINER_NAME}.rule="Host(\`${BOT_URL}\`)"
+    --label traefik.enable=true
+    --label traefik.http.services.${BOT_CONTAINER_NAME}.loadbalancer.server.port="8000"
+    --log-opt max-size=10m
+    --log-opt max-file=5
+    --env-file .env.runtime
+    -e EXTG_POSTGRES__DSN="${POSTGRES_DSN}"
+    -e EXTG_BOT__HOST=0.0.0.0
+    -e EXTG_TELETHON_SERVICE__BASE_URL="http://${TELETHON_SERVICE_CONTAINER_NAME}:8092"
+    -e EXTG_KAFKA__BOOTSTRAP_SERVERS="${KAFKA_CONTAINER_NAME}:9092"
+    -v ${ARCHIVE_IMPORTS_VOLUME_NAME}:/tmp/extg-archive-imports
+    ${BACKEND_IMAGE_NAME}
+  - docker network connect ${KAFKA_NETWORK_NAME} ${BOT_CONTAINER_NAME}
+  - docker run
+    -d
+    --memory=1g
+    --cpus=0.5
+    --name ${BOT_WORKER_CONTAINER_NAME}
+    --restart always
+    --network "${KAFKA_NETWORK_NAME}"
+    --log-opt max-size=10m
+    --log-opt max-file=5
+    --env-file .env.runtime
+    -e EXTG_POSTGRES__DSN="${POSTGRES_DSN}"
+    -e EXTG_TELETHON_SERVICE__BASE_URL="http://${TELETHON_SERVICE_CONTAINER_NAME}:8092"
+    -e EXTG_KAFKA__BOOTSTRAP_SERVERS="${KAFKA_CONTAINER_NAME}:9092"
+    -v ${ARCHIVE_IMPORTS_VOLUME_NAME}:/tmp/extg-archive-imports
+    ${BACKEND_IMAGE_NAME}
+    extg-worker
+
+.stop_backend: &stop_backend
+  - docker rm -f ${BOT_CONTAINER_NAME} || true
+  - docker rm -f ${BOT_WORKER_CONTAINER_NAME} || true
+  - docker rm -f ${TELETHON_SERVICE_CONTAINER_NAME} || true
+  - docker rm -f ${MIGRATE_CONTAINER_NAME} || true
+  - docker rm -f ${KAFKA_CONTAINER_NAME} || true
+  - docker network rm ${KAFKA_NETWORK_NAME} || true
+  - docker volume rm -f ${ARCHIVE_IMPORTS_VOLUME_NAME} || true
+  - docker volume rm -f ${KAFKA_CONTAINER_NAME}-data || true
+  - psql -c "select pg_terminate_backend(pid) from pg_stat_activity where datname = '${POSTGRES_DB}';" postgres || true
+  - psql -c "drop database \"${POSTGRES_DB}\"" postgres || true
+  - psql -c "drop user \"${POSTGRES_USER}\"" postgres || true
+
+# Jobs
+variables:
+  GIT_DEPTH: 1
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv"
+  BUILD_VERSION: "${CI_PIPELINE_IID}"
+
+stages:
+  - check
+  - build
+  - security
+  - deploy
+  - publish
 
 default:
   interruptible: true
 
-.python_test_base: &python_test_base
+lint:
   image: python:3.14-slim
-  stage: test
+  stage: check
   tags:
     - docker
-  cache:
-    key:
-      files:
-        - uv.lock
-    paths:
-      - .cache/uv
+  cache: *cache_dependencies
+  before_script:
+    - *install_dependencies
+  script:
+    - uv run python -m compileall src tests migrations
+  timeout: 3m
+
+test:
+  image: python:3.14-slim
+  stage: check
+  tags:
+    - docker
   services:
     - name: postgres:15-alpine
       alias: postgres
@@ -41,7 +212,9 @@ default:
         POSTGRES_DB: extg
         POSTGRES_USER: extg
         POSTGRES_PASSWORD: extg
+  cache: *cache_dependencies
   variables:
+    EXTG_ENVIRONMENT: test
     EXTG_POSTGRES__DSN: postgresql+asyncpg://extg:extg@postgres:5432/extg
     EXTG_SECURITY__MESSAGE_HMAC_SECRET: test-secret
     EXTG_SECURITY__TELEGRAM_SESSION_MASTER_KEY: test-master-key
@@ -57,122 +230,166 @@ default:
     EXTG_BOT__VERIFY_REQUESTS: "false"
     EXTG_KAFKA__ENABLED: "false"
   before_script:
-    - python -m pip install --upgrade pip uv
-    - uv sync --frozen --extra dev
-
-test-runtime:
-  <<: *python_test_base
-  script:
-    - uv run python -m compileall src tests migrations
-    - uv run pytest -q -p no:cacheprovider
-
-test-migrations:
-  <<: *python_test_base
+    - *install_dependencies
   script:
     - uv run alembic upgrade head
-    - uv run alembic current
+    - uv run pytest -q -p no:cacheprovider --junitxml=report.xml
     - uv run alembic check
-    - uv run alembic upgrade head --sql > /tmp/alembic-upgrade-head.sql
+  timeout: 10m
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: report.xml
+    paths:
+      - report.xml
 
-test-image-build:
-  image: docker:27
-  stage: test
-  tags:
-    - docker
-  services:
-    - docker:27-dind
-  before_script:
-    - cp .env.prod.example .env.prod
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml config >/tmp/docker-compose.prod.rendered.yml
-  script:
-    - docker build --pull -t extg-services:test-ci .
-    - docker image inspect extg-services:test-ci >/dev/null
+security:
+  stage: security
+  allow_failure: true
+  trigger:
+    include:
+      - project: devsecops/pipelines
+        file: integration_templates/python.yml
 
-.deploy_stack: &deploy_stack
-  - docker compose --env-file .env.prod -f docker-compose.prod.yml pull
-  - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d postgres kafka
-  - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm create-topics
-  - docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
-  - docker compose --env-file .env.prod -f docker-compose.prod.yml up -d telethon-service worker bot
-  - docker compose --env-file .env.prod -f docker-compose.prod.yml ps
-
-build-image:
-  image: docker:27
+build-bot:
+  image: registry.ccsteam.ru/cicd-images/docker:latest
   stage: build
   tags:
     - docker
-  services:
-    - docker:27-dind
   before_script:
-    - *set_backend_version
     - *set_env_vars
-    - *login_registry
+    - *set_backend_version
+    - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
   script:
-    - docker build --pull -t "${EXTG_IMAGE}" .
-    - docker push "${EXTG_IMAGE}"
-    - docker tag "${EXTG_IMAGE}" "${CI_REGISTRY_IMAGE}:latest"
-    - docker push "${CI_REGISTRY_IMAGE}:latest"
-  rules:
-    - if: '$CI_COMMIT_BRANCH'
+    - docker build
+      --label BackendVersion="${BACKEND_VERSION}"
+      --label org.opencontainers.image.revision="${CI_COMMIT_SHA}"
+      --force-rm
+      -t ${BACKEND_IMAGE_NAME}
+      .
+    - *login_registry
+    - docker push ${BACKEND_IMAGE_NAME}
+  timeout: 10m
 
-deploy-test:
-  image: docker:27
+deploy.botstest:
+  image: registry.ccsteam.ru/cicd-images/docker:latest
   stage: deploy
   tags:
     - bts-dev-bots
-  needs:
-    - build-image
-  before_script:
-    - *set_env_vars
-    - *login_registry
-    - test -n "${EXTG_TEST_ENV_FILE:-}" || (echo "EXTG_TEST_ENV_FILE is required" && exit 1)
-    - printf '%s\n' "${EXTG_TEST_ENV_FILE}" > .env.prod
-  script: *deploy_stack
+  rules:
+    - if: $CI_COMMIT_BRANCH
+  when: manual
   environment:
     name: test
-    on_stop: deploy-test-stop
-  resource_group: test
-  rules:
-    - if: '$CI_COMMIT_BRANCH'
-      when: manual
+    on_stop: deploy.botstest.stop
+  before_script:
+    - *set_env_vars
+    - *postgres_envs
+    - *login_registry
+    - *set_backend_version
+    - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
+    - BOT_URL="${BOT_CONTAINER_NAME}.${DEV_SERVER_HOST}"
+    - test -n "${EXTG_TEST_ENV_FILE:-}" || (echo "EXTG_TEST_ENV_FILE is required" && exit 1)
+    - printf '%s\n' "${EXTG_TEST_ENV_FILE}" > .env.runtime
+    - *extract_runtime_values
+  script:
+    - echo "Use URL https://${BOT_URL}/ in your cts admin site"
+    - *create_db
+    - *run_backend
+  timeout: 10m
 
-deploy-test-stop:
-  image: docker:27
+deploy.botstest.stop:
+  image: registry.ccsteam.ru/cicd-images/docker:latest
   stage: deploy
   tags:
     - bts-dev-bots
-  before_script:
-    - *set_env_vars
-    - test -n "${EXTG_TEST_ENV_FILE:-}" || (echo "EXTG_TEST_ENV_FILE is required" && exit 1)
-    - printf '%s\n' "${EXTG_TEST_ENV_FILE}" > .env.prod
-  script:
-    - docker compose --env-file .env.prod -f docker-compose.prod.yml down -v --remove-orphans
+  when: manual
   environment:
     name: test
     action: stop
-  resource_group: test
-  rules:
-    - if: '$CI_COMMIT_BRANCH'
-      when: manual
-
-deploy-prod:
-  # Assumes a runner with access to the target Docker engine
-  # (shell executor or docker socket on the deployment host).
-  image: docker:27
-  stage: deploy
-  tags:
-    - botsprod-yac
-  needs:
-    - build-image
   before_script:
     - *set_env_vars
-    - *login_registry
-    - test -n "${EXTG_PROD_ENV_FILE:-}" || (echo "EXTG_PROD_ENV_FILE is required" && exit 1)
-    - printf '%s\n' "${EXTG_PROD_ENV_FILE}" > .env.prod
-  script: *deploy_stack
+    - *postgres_envs
+  script:
+    - *stop_backend
+
+deploy.botsprod:
+  stage: deploy
+  image: registry.ccsteam.ru/cicd-images/docker:latest
+  tags:
+    - botsprod-yac
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+  when: manual
   environment:
     name: production
-  resource_group: production
+  before_script:
+    - *set_env_vars
+    - *postgres_envs
+    - *login_registry
+    - *set_backend_version
+    - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
+    - BOT_URL="${BOT_CONTAINER_NAME}.${PROD_SERVER_HOST}"
+    - test -n "${EXTG_PROD_ENV_FILE:-}" || (echo "EXTG_PROD_ENV_FILE is required" && exit 1)
+    - printf '%s\n' "${EXTG_PROD_ENV_FILE}" > .env.runtime
+    - *extract_runtime_values
+  script:
+    - echo "Use URL https://${BOT_URL}/ in your cts admin site"
+    - *create_db
+    - *run_backend
+  timeout: 10m
+
+.publish_eXpress_public_registry_before_script:
+  &publish_eXpress_public_registry_before_script
+  - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  - docker login -u $PUBLIC_REGISTRY_USER -p $PUBLIC_REGISTRY_PASSWORD $PUBLIC_REGISTRY
+  - docker pull $BACKEND_IMAGE_NAME
+  - BACKEND_PUBLIC_REGISTRY_PATH="${PUBLIC_REGISTRY}/${PUBLIC_REGISTRY_CATALOG}/${BOT_CONTAINER_NAME}"
+  - BACKEND_PUBLIC_RELEASE_IMAGE_NAME="${BACKEND_PUBLIC_REGISTRY_PATH}:${BACKEND_VERSION}"
+  - BACKEND_PUBLIC_LATEST_RELEASE_IMAGE="${BACKEND_PUBLIC_REGISTRY_PATH}:latest"
+  - docker tag ${BACKEND_IMAGE_NAME} ${BACKEND_PUBLIC_RELEASE_IMAGE_NAME}
+
+.publish_eXpress_public_registry_script: &publish_eXpress_public_registry_script
+  - docker push $BACKEND_PUBLIC_RELEASE_IMAGE_NAME
+
+.publish_eXpress_public_registry_after_script:
+  &publish_eXpress_public_registry_after_script
+  - docker rmi $BACKEND_IMAGE_NAME || true
+  - docker rmi $BACKEND_PUBLIC_RELEASE_IMAGE_NAME || true
+
+.eXpress_public_registry:
+  stage: publish
+  image: registry.ccsteam.ru/cicd-images/docker:latest
+  tags:
+    - docker
   rules:
-    - if: '$CI_COMMIT_BRANCH == "master"'
-      when: manual
+    - if: $CI_COMMIT_TAG
+  when: manual
+  environment:
+    name: publish
+
+eXpress_public_registry:
+  extends: .eXpress_public_registry
+  before_script:
+    - *set_env_vars
+    - *set_backend_version
+    - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
+    - *publish_eXpress_public_registry_before_script
+  script: *publish_eXpress_public_registry_script
+  after_script: *publish_eXpress_public_registry_after_script
+
+eXpress_public_registry.as_latest:
+  extends: .eXpress_public_registry
+  before_script:
+    - *set_env_vars
+    - *set_backend_version
+    - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
+    - *publish_eXpress_public_registry_before_script
+    - docker image tag $BACKEND_IMAGE_NAME $BACKEND_PUBLIC_LATEST_RELEASE_IMAGE
+  script:
+    - *publish_eXpress_public_registry_script
+    - docker push $BACKEND_PUBLIC_LATEST_RELEASE_IMAGE
+  after_script:
+    - *publish_eXpress_public_registry_after_script
+    - docker rmi $BACKEND_PUBLIC_LATEST_RELEASE_IMAGE || true
