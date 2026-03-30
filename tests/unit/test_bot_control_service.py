@@ -27,6 +27,7 @@ from extg_migration_runtime.application.use_cases.reconcile_migration import (
 )
 from extg_migration_runtime.application.target_chat_provisioning import (
     ParticipantAccessApplyResult,
+    ParticipantAccessFailure,
 )
 from extg_migration_runtime.infrastructure.express.fake_gateway import FakeExpressGateway
 from extg_migration_runtime.infrastructure.persistence.in_memory import (
@@ -3212,6 +3213,96 @@ async def test_add_chat_members_from_workbook_prefers_email_over_ad_login_and_ot
     assert result.resolved_targets == 1
     assert result.direct_added == 1
     assert result.invited == 0
+
+
+@pytest.mark.asyncio
+async def test_add_chat_members_from_workbook_returns_failed_target_labels_for_partial_direct_add():
+    service, _ = build_service(
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+    )
+    service._identity_directory._user_huid_by_email["alice@example.com"] = "alice-huid"
+    service._identity_directory._user_huid_by_ad_login["bob"] = "bob-huid"
+    service._target_chat_provisioning_service.member_add_result = ParticipantAccessApplyResult(
+        added_huids=("alice-huid",),
+        failed_targets=(
+            ParticipantAccessFailure(
+                target_huid="bob-huid",
+                cts_host="cts-main.example.test",
+                reason="direct_add_failed",
+                error="Sender is not chat admin",
+            ),
+        ),
+    )
+    await service._chat_migration_config_repository.save(
+        ChatMigrationConfigRecord(
+            migration_id="migration-bot-dynamic",
+            source_chat_id="group-1",
+            source_chat_type="group",
+            source_chat_title="Group One",
+            source_backend="telethon_user_session",
+            target_strategy="create",
+            target_title="Imported Group One",
+            target_chat_id=None,
+            include_from=None,
+            include_to=None,
+            migrate_media=True,
+            reply_mode="inline_quote",
+            identity_policy="matrix_uploaded",
+            access_strategy="direct_add",
+            updated_by_huid="operator-1",
+            created_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+            anchor_cts_host="cts-main.example.test",
+        ),
+    )
+    await service._chat_mapping_repository.save(
+        ChatMappingRecord(
+            migration_id="migration-bot-dynamic",
+            source_chat_id="group-1",
+            source_chat_type="group",
+            source_chat_title="Group One",
+            target_chat_id="3b3fd173-f5fe-4a35-a50b-aac45f7d1abc",
+            target_chat_title="Imported Group One",
+            status="completed",
+            created_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+            anchor_cts_host="cts-main.example.test",
+        ),
+    )
+    workbook = service._identity_matrix_workbook_service.build_workbook(
+        rows=[
+            IdentityMatrixWorkbookRow(
+                telegram_user_id=None,
+                telegram_username=None,
+                telegram_display_name="Alice",
+                corporate_email="alice@example.com",
+                target_huid=None,
+            ),
+            IdentityMatrixWorkbookRow(
+                telegram_user_id=None,
+                telegram_username=None,
+                telegram_display_name="Bob",
+                corporate_email=None,
+                target_huid=None,
+                ad_login="bob",
+            ),
+        ],
+    )
+
+    result = await service.add_chat_members_from_workbook(
+        operator=BotOperatorContext(
+            huid="operator-1",
+            chat_id="operator-chat",
+            ad_domain="corp.example",
+        ),
+        chat_selector="group-1",
+        workbook_content=workbook,
+    )
+
+    assert result.effective_result == "partial_direct_add"
+    assert result.failed_targets == ("ad_login=bob",)
 
 
 @pytest.mark.asyncio

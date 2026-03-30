@@ -471,6 +471,26 @@ class PybotxExpressGateway:
                 chat_id=chat_uuid,
                 huids=missing_admins,
             )
+            refreshed_chat_info = await self._bot.chat_info(
+                bot_id=self._bot_id,
+                chat_id=chat_uuid,
+            )
+            refreshed_admins = {
+                str(member.huid)
+                for member in refreshed_chat_info.members
+                if member.is_admin
+            }
+            missing_after_promote = [
+                huid
+                for huid in missing_admins
+                if str(huid) not in refreshed_admins
+            ]
+            if missing_after_promote:
+                raise FatalItemError(
+                    "eXpress promote_chat_admins verification failed: "
+                    "members not visible as admins after promote_to_chat_admins; "
+                    f"missing_admin_huids={missing_after_promote}",
+                )
         except InvalidUsersListError as error:
             try:
                 refreshed_chat_info = await self._bot.chat_info(

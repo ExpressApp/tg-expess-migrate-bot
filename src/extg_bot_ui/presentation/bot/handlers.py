@@ -674,6 +674,12 @@ def _format_chat_members_add_result(result: BotChatMembersAddResult) -> str:
             f"skipped_rows={result.skipped_rows}",
         ],
     )
+    if result.failed_targets:
+        lines.append(f"failed_to_add={len(result.failed_targets)}")
+        lines.extend(
+            f"failed_user={label}"
+            for label in result.failed_targets
+        )
     return "\n".join(lines)
 
 

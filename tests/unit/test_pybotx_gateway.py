@@ -93,6 +93,44 @@ class MembershipStubBot:
             existing.add(normalized)
 
 
+class AdminStubBot:
+    def __init__(
+        self,
+        *,
+        existing_admin_huids: list[str] | None = None,
+        confirm_promoted_admin_huids: bool = True,
+    ) -> None:
+        self._members = [
+            SimpleNamespace(huid=UUID(huid), is_admin=True)
+            for huid in (existing_admin_huids or [])
+        ]
+        self._confirm_promoted_admin_huids = confirm_promoted_admin_huids
+        self.promote_calls: list[dict[str, object]] = []
+
+    async def chat_info(self, *, bot_id, chat_id):
+        return SimpleNamespace(members=list(self._members))
+
+    async def promote_to_chat_admins(self, *, bot_id, chat_id, huids):
+        self.promote_calls.append(
+            {
+                "bot_id": bot_id,
+                "chat_id": chat_id,
+                "huids": list(huids),
+            },
+        )
+        if not self._confirm_promoted_admin_huids:
+            return
+        existing = {str(member.huid) for member in self._members if member.is_admin}
+        for huid in huids:
+            normalized = str(huid)
+            if normalized in existing:
+                continue
+            self._members.append(
+                SimpleNamespace(huid=UUID(normalized), is_admin=True)
+            )
+            existing.add(normalized)
+
+
 def _malformed_staged_file_transport(request: httpx.Request) -> httpx.Response:
     return httpx.Response(
         400,
@@ -387,6 +425,26 @@ async def test_ensure_chat_members_raises_when_add_is_not_confirmed() -> None:
 
     with pytest.raises(Exception, match="members not visible after add_users_to_chat"):
         await gateway.ensure_chat_members(
+            "043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+            ["b7ceffbf-6f4f-4f23-87d0-8a61d4d2ea61"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_promote_chat_admins_raises_when_promotion_is_not_confirmed() -> None:
+    bot = AdminStubBot(confirm_promoted_admin_huids=False)
+    gateway = PybotxExpressGateway(
+        bot_id="043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+        cts_url="https://cts11dev.ccsteam.ru/",
+        secret_key="secret",
+        bot=bot,
+    )
+
+    with pytest.raises(
+        Exception,
+        match="members not visible as admins after promote_to_chat_admins",
+    ):
+        await gateway.promote_chat_admins(
             "043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
             ["b7ceffbf-6f4f-4f23-87d0-8a61d4d2ea61"],
         )

@@ -59,9 +59,18 @@ class ResolvedParticipantTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ParticipantAccessFailure:
+    target_huid: str
+    cts_host: str | None = None
+    reason: str = "direct_add_failed"
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ParticipantAccessApplyResult:
     added_huids: tuple[str, ...] = ()
     invited_huids: tuple[str, ...] = ()
+    failed_targets: tuple[ParticipantAccessFailure, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -1096,12 +1105,19 @@ class TargetChatProvisioningService:
         added_huids: list[str] = []
         added_by_cts_host: dict[str, list[str]] = {}
         fallback_targets: list[ResolvedParticipantTarget] = []
+        failed_targets: list[ParticipantAccessFailure] = []
         for route_cts_host, grouped_targets in self._partition_targets_by_cts_host(
             filtered_targets,
             anchor_cts_host=effective_anchor_cts_host,
         ).items():
             if not self._is_cts_host_configured(route_cts_host):
                 fallback_targets.extend(grouped_targets)
+                failed_targets.extend(
+                    self._participant_access_failures(
+                        grouped_targets,
+                        reason="invite_route_missing",
+                    ),
+                )
                 await self._audit_repository.add(
                     AuditEvent(
                         migration_id=migration_id,
@@ -1120,26 +1136,25 @@ class TargetChatProvisioningService:
                 )
                 continue
             participant_huids = [target.target_huid for target in grouped_targets]
-            await self._ensure_helper_bot_route_membership(
-                chat_kind=chat_kind,
-                migration_id=migration_id,
-                source_chat_id=source_chat_id,
-                target_chat_id=target_chat_id,
-                route_cts_host=route_cts_host,
-                anchor_cts_host=effective_anchor_cts_host,
-            )
             try:
-                newly_added, effective_sync_cts_host = await self._ensure_chat_members_with_cross_cts_retry(
+                await self._ensure_helper_bot_route_membership(
                     chat_kind=chat_kind,
                     migration_id=migration_id,
                     source_chat_id=source_chat_id,
                     target_chat_id=target_chat_id,
-                    participant_huids=participant_huids,
                     route_cts_host=route_cts_host,
                     anchor_cts_host=effective_anchor_cts_host,
                 )
             except FatalItemError as error:
                 fallback_targets.extend(grouped_targets)
+                reason = "helper_bot_route_membership_failed"
+                failed_targets.extend(
+                    self._participant_access_failures(
+                        grouped_targets,
+                        reason=reason,
+                        error=str(error),
+                    ),
+                )
                 self._log(
                     "warning",
                     self._members_sync_degraded_event_type(chat_kind),
@@ -1148,7 +1163,7 @@ class TargetChatProvisioningService:
                     target_chat_id=target_chat_id,
                     route_cts_host=route_cts_host,
                     participant_huids=participant_huids,
-                    reason="direct_add_failed",
+                    reason=reason,
                     error_type=type(error).__name__,
                     error=str(error),
                 )
@@ -1162,7 +1177,108 @@ class TargetChatProvisioningService:
                             "target_chat_id": target_chat_id,
                             "route_cts_host": route_cts_host,
                             "participant_huids": participant_huids,
-                            "reason": "direct_add_failed",
+                            "reason": reason,
+                            "error": str(error),
+                        },
+                        created_at=self._now(),
+                    ),
+                )
+                continue
+            except (RecoverableItemError, AmbiguousDeliveryError):
+                raise
+
+            try:
+                newly_added, effective_sync_cts_host = await self._ensure_chat_members_with_cross_cts_retry(
+                    chat_kind=chat_kind,
+                    migration_id=migration_id,
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_chat_id,
+                    participant_huids=participant_huids,
+                    route_cts_host=route_cts_host,
+                    anchor_cts_host=effective_anchor_cts_host,
+                )
+            except FatalItemError as error:
+                if len(grouped_targets) > 1:
+                    self._log(
+                        "warning",
+                        self._members_sync_degraded_event_type(chat_kind),
+                        migration_id=migration_id,
+                        source_chat_id=source_chat_id,
+                        target_chat_id=target_chat_id,
+                        route_cts_host=route_cts_host,
+                        participant_huids=participant_huids,
+                        reason="direct_add_batch_failed_retrying_individually",
+                        error_type=type(error).__name__,
+                        error=str(error),
+                    )
+                    await self._audit_repository.add(
+                        AuditEvent(
+                            migration_id=migration_id,
+                            source_chat_id=source_chat_id,
+                            event_type=self._members_sync_degraded_event_type(chat_kind),
+                            severity=AuditSeverity.WARNING,
+                            payload_json={
+                                "target_chat_id": target_chat_id,
+                                "route_cts_host": route_cts_host,
+                                "participant_huids": participant_huids,
+                                "reason": "direct_add_batch_failed_retrying_individually",
+                                "error": str(error),
+                            },
+                            created_at=self._now(),
+                        ),
+                    )
+                    (
+                        individually_added_huids,
+                        individually_added_by_cts_host,
+                        individually_failed_targets,
+                        individually_failed_participants,
+                    ) = await self._ensure_chat_members_with_best_effort(
+                        chat_kind=chat_kind,
+                        migration_id=migration_id,
+                        source_chat_id=source_chat_id,
+                        target_chat_id=target_chat_id,
+                        grouped_targets=grouped_targets,
+                        route_cts_host=route_cts_host,
+                        anchor_cts_host=effective_anchor_cts_host,
+                    )
+                    added_huids.extend(individually_added_huids)
+                    for cts_host, huids in individually_added_by_cts_host.items():
+                        added_by_cts_host.setdefault(cts_host, []).extend(huids)
+                    fallback_targets.extend(individually_failed_targets)
+                    failed_targets.extend(individually_failed_participants)
+                    continue
+                fallback_targets.extend(grouped_targets)
+                reason = "direct_add_failed"
+                failed_targets.extend(
+                    self._participant_access_failures(
+                        grouped_targets,
+                        reason=reason,
+                        error=str(error),
+                    ),
+                )
+                self._log(
+                    "warning",
+                    self._members_sync_degraded_event_type(chat_kind),
+                    migration_id=migration_id,
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_chat_id,
+                    route_cts_host=route_cts_host,
+                    participant_huids=participant_huids,
+                    reason=reason,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
+                await self._audit_repository.add(
+                    AuditEvent(
+                        migration_id=migration_id,
+                        source_chat_id=source_chat_id,
+                        event_type=self._members_sync_degraded_event_type(chat_kind),
+                        severity=AuditSeverity.WARNING,
+                        payload_json={
+                            "target_chat_id": target_chat_id,
+                            "route_cts_host": route_cts_host,
+                            "participant_huids": participant_huids,
+                            "reason": reason,
                             "error": str(error),
                         },
                         created_at=self._now(),
@@ -1206,6 +1322,10 @@ class TargetChatProvisioningService:
                     "added_huids": added_huids,
                     "added_by_cts_host": added_by_cts_host,
                     "fallback_invite_count": len(fallback_targets),
+                    "failed_target_huids": [
+                        item.target_huid for item in failed_targets
+                    ],
+                    "failed_target_count": len(failed_targets),
                 },
                 created_at=self._now(),
             ),
@@ -1213,6 +1333,7 @@ class TargetChatProvisioningService:
         return ParticipantAccessApplyResult(
             added_huids=tuple(added_huids),
             invited_huids=invite_result.invited_huids,
+            failed_targets=tuple(failed_targets),
         )
 
     async def _ensure_chat_members_with_cross_cts_retry(
@@ -1286,6 +1407,80 @@ class TargetChatProvisioningService:
             )
             return newly_added, normalized_anchor_cts_host
 
+    async def _ensure_chat_members_with_best_effort(
+        self,
+        *,
+        chat_kind: str,
+        migration_id: str,
+        source_chat_id: str,
+        target_chat_id: str,
+        grouped_targets: list[ResolvedParticipantTarget],
+        route_cts_host: str | None,
+        anchor_cts_host: str | None,
+    ) -> tuple[
+        tuple[str, ...],
+        dict[str, list[str]],
+        tuple[ResolvedParticipantTarget, ...],
+        tuple[ParticipantAccessFailure, ...],
+    ]:
+        added_huids: list[str] = []
+        added_by_cts_host: dict[str, list[str]] = {}
+        failed_targets: list[ResolvedParticipantTarget] = []
+        failures: list[ParticipantAccessFailure] = []
+        for target in grouped_targets:
+            try:
+                newly_added, effective_sync_cts_host = await self._ensure_chat_members_with_cross_cts_retry(
+                    chat_kind=chat_kind,
+                    migration_id=migration_id,
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_chat_id,
+                    participant_huids=[target.target_huid],
+                    route_cts_host=route_cts_host,
+                    anchor_cts_host=anchor_cts_host,
+                )
+            except FatalItemError as error:
+                failed_targets.append(target)
+                failures.append(
+                    ParticipantAccessFailure(
+                        target_huid=target.target_huid,
+                        cts_host=normalize_express_cts_host(target.cts_host),
+                        reason="direct_add_failed",
+                        error=str(error),
+                    ),
+                )
+                continue
+            normalized_route = (
+                effective_sync_cts_host
+                or self._resolve_anchor_cts_host(anchor_cts_host)
+                or "default"
+            )
+            if newly_added:
+                added_huids.extend(newly_added)
+                added_by_cts_host.setdefault(normalized_route, []).extend(newly_added)
+        return (
+            tuple(added_huids),
+            added_by_cts_host,
+            tuple(failed_targets),
+            tuple(failures),
+        )
+
+    def _participant_access_failures(
+        self,
+        targets: list[ResolvedParticipantTarget],
+        *,
+        reason: str,
+        error: str | None = None,
+    ) -> list[ParticipantAccessFailure]:
+        return [
+            ParticipantAccessFailure(
+                target_huid=target.target_huid,
+                cts_host=normalize_express_cts_host(target.cts_host),
+                reason=reason,
+                error=error,
+            )
+            for target in targets
+        ]
+
     async def _ensure_chat_members_via_cts_host(
         self,
         *,
@@ -1333,6 +1528,7 @@ class TargetChatProvisioningService:
             if next_error is current:
                 break
             current = next_error
+        return False
 
     async def _ensure_initiator_chat_admin(
         self,
@@ -1453,7 +1649,12 @@ class TargetChatProvisioningService:
                     created_at=self._now(),
                 ),
             )
-            return
+            raise FatalItemError(
+                "helper bot route membership attach failed: "
+                f"helper_cts_host={normalized_route_cts_host} "
+                f"anchor_cts_host={normalized_anchor_cts_host} "
+                f"helper_bot_huid={helper_bot_huid}; error={error}",
+            ) from error
         except (RecoverableItemError, AmbiguousDeliveryError):
             raise
         try:
@@ -1482,7 +1683,12 @@ class TargetChatProvisioningService:
                     created_at=self._now(),
                 ),
             )
-            return
+            raise FatalItemError(
+                "helper bot route membership admin promotion failed: "
+                f"helper_cts_host={normalized_route_cts_host} "
+                f"anchor_cts_host={normalized_anchor_cts_host} "
+                f"helper_bot_huid={helper_bot_huid}; error={error}",
+            ) from error
         except (RecoverableItemError, AmbiguousDeliveryError):
             raise
         await self._audit_repository.add(

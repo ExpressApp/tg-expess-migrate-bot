@@ -316,6 +316,7 @@ class BotChatMembersAddResult:
     direct_added: int
     invited: int
     skipped_rows: int
+    failed_targets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -812,6 +813,7 @@ class MigrationBotControlService:
         async def run() -> BotChatMembersAddResult:
             rows = self._identity_matrix_workbook_service.parse_workbook(workbook_content)
             participant_targets: list[ResolvedParticipantTarget] = []
+            target_labels_by_huid: dict[str, str] = {}
             processed_rows = 0
             imported_identity_mappings = 0
             mapping_skipped_rows = 0
@@ -862,6 +864,10 @@ class MigrationBotControlService:
                         cts_host=normalize_express_cts_host(lookup.cts_host),
                     ),
                 )
+                target_labels_by_huid.setdefault(
+                    lookup.target_huid,
+                    self._workbook_row_label(row, fallback_huid=lookup.target_huid),
+                )
                 processed_rows += 1
             if not participant_targets:
                 raise ConfigurationError("workbook does not contain any resolvable users to add")
@@ -889,11 +895,18 @@ class MigrationBotControlService:
                     "mapping_skipped_rows": mapping_skipped_rows,
                     "direct_added": len(access_result.added_huids),
                     "invited": len(access_result.invited_huids),
+                    "failed_target_huids": [
+                        item.target_huid for item in access_result.failed_targets
+                    ],
                 },
             )
             requested_access_strategy = binding.config.access_strategy or "direct_add"
             direct_added_count = len(access_result.added_huids)
             invited_count = len(access_result.invited_huids)
+            failed_target_labels = tuple(
+                target_labels_by_huid.get(item.target_huid, item.target_huid)
+                for item in access_result.failed_targets
+            )
             return BotChatMembersAddResult(
                 source_chat_id=binding.config.source_chat_id,
                 target_chat_id=binding.mapping.target_chat_id,
@@ -903,6 +916,7 @@ class MigrationBotControlService:
                     requested_access_strategy=requested_access_strategy,
                     direct_added=direct_added_count,
                     invited=invited_count,
+                    failed=len(access_result.failed_targets),
                 ),
                 invite_fallback_used=(
                     requested_access_strategy == "direct_add" and invited_count > 0
@@ -914,6 +928,7 @@ class MigrationBotControlService:
                 direct_added=direct_added_count,
                 invited=invited_count,
                 skipped_rows=skipped_rows,
+                failed_targets=failed_target_labels,
             )
 
         return await self._execute_for_source_backends(
@@ -2881,6 +2896,28 @@ class MigrationBotControlService:
             }
         raise ConfigurationError("workbook row does not contain a supported corporate selector")
 
+    def _workbook_row_label(
+        self,
+        row: IdentityMatrixWorkbookRow,
+        *,
+        fallback_huid: str,
+    ) -> str:
+        if row.target_huid is not None and row.target_huid.strip():
+            return f"huid={row.target_huid.strip()}"
+        if row.corporate_email is not None and row.corporate_email.strip():
+            return f"email={row.corporate_email.strip().lower()}"
+        if row.ad_login is not None and row.ad_login.strip():
+            return f"ad_login={row.ad_login.strip()}"
+        if row.other_id is not None and row.other_id.strip():
+            return f"other_id={row.other_id.strip()}"
+        if row.telegram_username is not None and row.telegram_username.strip():
+            return f"telegram_username={row.telegram_username.strip()}"
+        if row.telegram_user_id is not None and row.telegram_user_id.strip():
+            return f"telegram_user_id={row.telegram_user_id.strip()}"
+        if row.telegram_display_name.strip():
+            return f"display_name={row.telegram_display_name.strip()}"
+        return f"huid={fallback_huid}"
+
     async def _private_chat_peer_entry(
         self,
         source_chat_id: str,
@@ -3528,16 +3565,21 @@ class MigrationBotControlService:
         requested_access_strategy: str,
         direct_added: int,
         invited: int,
+        failed: int = 0,
     ) -> str:
         normalized_requested = (requested_access_strategy or "direct_add").strip().lower()
         if direct_added > 0 and invited > 0:
             return "mixed"
+        if direct_added > 0 and failed > 0:
+            return "partial_direct_add"
         if direct_added > 0:
             return "direct_add"
         if invited > 0:
             if normalized_requested == "direct_add":
                 return "invite_link_fallback"
             return "invite_link"
+        if failed > 0:
+            return "failed"
         return "no_change"
 
     def _resolve_manifest_anchor_cts_host(
