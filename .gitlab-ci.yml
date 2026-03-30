@@ -278,13 +278,25 @@ build-bot:
       .
     - *login_registry
     - docker push ${BACKEND_IMAGE_NAME}
+    - printf 'BACKEND_VERSION=%s\nBACKEND_IMAGE_NAME=%s\n' "${BACKEND_VERSION}" "${BACKEND_IMAGE_NAME}" > build.env
   timeout: 10m
+  artifacts:
+    expire_in: 7 days
+    reports:
+      dotenv: build.env
+    paths:
+      - build.env
 
 deploy.botstest:
   image: registry.ccsteam.ru/cicd-images/docker:latest
   stage: deploy
   tags:
     - bots-test-new
+  needs:
+    - job: build-bot
+      artifacts: true
+  variables:
+    GIT_STRATEGY: none
   rules:
     - if: $CI_COMMIT_BRANCH
   when: manual
@@ -295,8 +307,8 @@ deploy.botstest:
     - *set_env_vars
     - *postgres_envs
     - *login_registry
-    - *set_backend_version
-    - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
+    - test -n "${BACKEND_VERSION:-}" || (echo "BACKEND_VERSION is required from build-bot artifact" && exit 1)
+    - test -n "${BACKEND_IMAGE_NAME:-}" || (echo "BACKEND_IMAGE_NAME is required from build-bot artifact" && exit 1)
     - BOT_URL="${BOT_CONTAINER_NAME}.${DEV_SERVER_HOST}"
     - test -n "${EXTG_TEST_ENV_FILE:-}" || (echo "EXTG_TEST_ENV_FILE is required" && exit 1)
     - RUNTIME_ENV_SOURCE="${EXTG_TEST_ENV_FILE}"
@@ -313,6 +325,8 @@ deploy.botstest.stop:
   stage: deploy
   tags:
     - bts-dev-bots
+  variables:
+    GIT_STRATEGY: none
   when: manual
   environment:
     name: test
@@ -328,6 +342,11 @@ deploy.botsprod:
   image: registry.ccsteam.ru/cicd-images/docker:latest
   tags:
     - botsprod-yac
+  needs:
+    - job: build-bot
+      artifacts: true
+  variables:
+    GIT_STRATEGY: none
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
   when: manual
@@ -337,8 +356,8 @@ deploy.botsprod:
     - *set_env_vars
     - *postgres_envs
     - *login_registry
-    - *set_backend_version
-    - BACKEND_IMAGE_NAME="${CI_REGISTRY_IMAGE}:${BACKEND_VERSION}-${BUILD_VERSION}"
+    - test -n "${BACKEND_VERSION:-}" || (echo "BACKEND_VERSION is required from build-bot artifact" && exit 1)
+    - test -n "${BACKEND_IMAGE_NAME:-}" || (echo "BACKEND_IMAGE_NAME is required from build-bot artifact" && exit 1)
     - BOT_URL="${BOT_CONTAINER_NAME}.${PROD_SERVER_HOST}"
     - test -n "${EXTG_PROD_ENV_FILE:-}" || (echo "EXTG_PROD_ENV_FILE is required" && exit 1)
     - RUNTIME_ENV_SOURCE="${EXTG_PROD_ENV_FILE}"

@@ -103,6 +103,7 @@ class _SharedCrossCtsGateway:
         shared_state: dict[str, object],
         user_huid_by_email: dict[str, str] | None = None,
         fatal_member_sync_hosts: set[str] | None = None,
+        local_chat_lookup_hosts: set[str] | None = None,
     ) -> None:
         self.host = host
         self.bot_member_huid = bot_member_huid
@@ -112,6 +113,7 @@ class _SharedCrossCtsGateway:
             for email, huid in (user_huid_by_email or {}).items()
         }
         self._fatal_member_sync_hosts = set(fatal_member_sync_hosts or set())
+        self._local_chat_lookup_hosts = set(local_chat_lookup_hosts or set())
         self.member_sync_calls: list[tuple[str, tuple[str, ...]]] = []
         self.admin_promotion_calls: list[tuple[str, tuple[str, ...]]] = []
         self.personal_chat_calls: list[str] = []
@@ -142,6 +144,16 @@ class _SharedCrossCtsGateway:
         participant_huids: list[str],
     ) -> tuple[str, ...]:
         self.member_sync_calls.append((target_chat_id, tuple(participant_huids)))
+        created_by = self._shared_state.setdefault("created_by", {}).get(target_chat_id)
+        if (
+            self.host in self._local_chat_lookup_hosts
+            and created_by is not None
+            and created_by != self.host
+        ):
+            raise FatalItemError(
+                f"eXpress ensure_chat_members failed: chat_not_found host={self.host} "
+                f"target_chat_id={target_chat_id}",
+            )
         admins = self._shared_state.setdefault("admins", {}).setdefault(target_chat_id, [])
         if self.bot_member_huid not in admins:
             raise FatalItemError(f"sender is not chat admin for host={self.host}")
@@ -996,6 +1008,121 @@ async def test_group_chat_routes_foreign_participant_direct_add_via_helper_cts()
     assert gateways["cts-helper.example.test"].member_sync_calls == [
         (mapping.target_chat_id, ("alice-huid",)),
     ]
+
+
+@pytest.mark.asyncio
+async def test_group_chat_reroutes_foreign_participant_direct_add_via_anchor_when_route_chat_is_not_visible():
+    identity_repo = InMemoryIdentityMappingRepository()
+    await identity_repo.save(
+        IdentityMappingRecord(
+            telegram_user_id="user-1",
+            telegram_username="alice",
+            telegram_display_name="Alice",
+            corporate_email="alice@example.com",
+            target_huid="alice-huid",
+        ),
+    )
+    binding_repo = InMemoryExpressUserCtsBindingRepository()
+    await binding_repo.save(
+        ExpressUserCtsBindingRecord(
+            target_huid="alice-huid",
+            corporate_email="alice@example.com",
+            cts_host="cts-helper.example.test",
+        ),
+    )
+    shared_state: dict[str, object] = {}
+    gateways: dict[str, _SharedCrossCtsGateway] = {}
+    express_gateway = ExpressGatewayRouter(
+        account_registry=_multi_cts_registry(),
+        gateway_factory=lambda account: gateways.setdefault(
+            account.cts_host,
+            _SharedCrossCtsGateway(
+                host=account.cts_host,
+                bot_member_huid=account.effective_bot_member_huid,
+                shared_state=shared_state,
+                local_chat_lookup_hosts={"cts-helper.example.test"},
+            ),
+        ),
+    )
+    telegram_gateway = FakeTelegramGateway(
+        dialogs=[SourceDialog(dialog_id="-100891", chat_type="group", title="Team Chat")],
+        messages_by_dialog={},
+        participants_by_dialog={
+            "-100891": [
+                SourceParticipant(
+                    external_id="user-1",
+                    username="alice",
+                    display_name="Alice",
+                ),
+            ],
+        },
+    )
+    audit_repository = InMemoryAuditRepository()
+    service = TargetChatProvisioningService(
+        telegram_gateway=telegram_gateway,
+        express_gateway=express_gateway,
+        chat_mapping_repository=InMemoryChatMappingRepository(),
+        identity_directory=UsernameEmailIdentityDirectory(
+            identity_mapping_repository=identity_repo,
+            express_gateway=express_gateway,
+            cts_resolution_service=CtsResolutionService(
+                express_gateway=express_gateway,
+                binding_repository=binding_repo,
+            ),
+        ),
+        audit_repository=audit_repository,
+        retry_policy=AsyncRetryPolicy(
+            max_attempts=1,
+            base_delay_seconds=0,
+            max_delay_seconds=0,
+            jitter_seconds=0,
+        ),
+    )
+
+    mapping = await service.ensure_target_chat(
+        migration_id="migration-bot",
+        dialog=ManifestDialog(
+            source_chat_id="-100891",
+            source_chat_type="group",
+            target_strategy="create",
+            target_title="Imported Group",
+            initiator_huid="initiator-huid",
+            anchor_cts_host="cts-main.example.test",
+            access_strategy="direct_add",
+        ),
+    )
+
+    participants = shared_state["participants"][mapping.target_chat_id]
+    audit_events = await audit_repository.list_all()
+    rerouted_event = next(
+        event
+        for event in audit_events
+        if event.event_type == "target_chat_members_sync_rerouted"
+    )
+
+    assert participants == ["initiator-huid", "helper-bot-huid", "alice-huid"]
+    assert gateways["cts-main.example.test"].member_sync_calls == [
+        (mapping.target_chat_id, ("helper-bot-huid",)),
+        (mapping.target_chat_id, ("alice-huid",)),
+    ]
+    assert gateways["cts-main.example.test"].admin_promotion_calls == [
+        (mapping.target_chat_id, ("initiator-huid",)),
+        (mapping.target_chat_id, ("helper-bot-huid",)),
+    ]
+    assert gateways["cts-helper.example.test"].member_sync_calls == [
+        (mapping.target_chat_id, ("alice-huid",)),
+    ]
+    assert rerouted_event.payload_json == {
+        "target_chat_id": mapping.target_chat_id,
+        "route_cts_host": "cts-helper.example.test",
+        "fallback_cts_host": "cts-main.example.test",
+        "participant_huids": ["alice-huid"],
+        "reason": "route_chat_not_found",
+        "route_error": (
+            "eXpress ensure_chat_members failed: chat_not_found "
+            f"host=cts-helper.example.test target_chat_id={mapping.target_chat_id}"
+        ),
+    }
 
 
 @pytest.mark.asyncio

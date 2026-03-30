@@ -1129,13 +1129,15 @@ class TargetChatProvisioningService:
                 anchor_cts_host=effective_anchor_cts_host,
             )
             try:
-                with self._use_cts_host(route_cts_host):
-                    newly_added = await self._retry_policy.run(
-                        lambda participant_huids=participant_huids: self._express_gateway.ensure_chat_members(
-                            target_chat_id,
-                            participant_huids,
-                        ),
-                    )
+                newly_added, effective_sync_cts_host = await self._ensure_chat_members_with_cross_cts_retry(
+                    chat_kind=chat_kind,
+                    migration_id=migration_id,
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_chat_id,
+                    participant_huids=participant_huids,
+                    route_cts_host=route_cts_host,
+                    anchor_cts_host=effective_anchor_cts_host,
+                )
             except FatalItemError as error:
                 fallback_targets.extend(grouped_targets)
                 self._log(
@@ -1171,7 +1173,9 @@ class TargetChatProvisioningService:
                 raise
 
             if newly_added:
-                normalized_route = route_cts_host or effective_anchor_cts_host or "default"
+                normalized_route = (
+                    effective_sync_cts_host or effective_anchor_cts_host or "default"
+                )
                 added_huids.extend(newly_added)
                 added_by_cts_host.setdefault(normalized_route, []).extend(newly_added)
 
@@ -1210,6 +1214,125 @@ class TargetChatProvisioningService:
             added_huids=tuple(added_huids),
             invited_huids=invite_result.invited_huids,
         )
+
+    async def _ensure_chat_members_with_cross_cts_retry(
+        self,
+        *,
+        chat_kind: str,
+        migration_id: str,
+        source_chat_id: str,
+        target_chat_id: str,
+        participant_huids: list[str],
+        route_cts_host: str | None,
+        anchor_cts_host: str | None,
+    ) -> tuple[tuple[str, ...], str | None]:
+        normalized_route_cts_host = normalize_express_cts_host(route_cts_host)
+        normalized_anchor_cts_host = self._resolve_anchor_cts_host(anchor_cts_host)
+        try:
+            newly_added = await self._ensure_chat_members_via_cts_host(
+                cts_host=normalized_route_cts_host,
+                target_chat_id=target_chat_id,
+                participant_huids=participant_huids,
+            )
+            return newly_added, normalized_route_cts_host
+        except FatalItemError as route_error:
+            if not self._should_retry_member_sync_via_anchor(
+                error=route_error,
+                route_cts_host=normalized_route_cts_host,
+                anchor_cts_host=normalized_anchor_cts_host,
+            ):
+                raise
+            try:
+                newly_added = await self._ensure_chat_members_via_cts_host(
+                    cts_host=normalized_anchor_cts_host,
+                    target_chat_id=target_chat_id,
+                    participant_huids=participant_huids,
+                )
+            except FatalItemError as anchor_error:
+                raise FatalItemError(
+                    "eXpress ensure_chat_members failed after cross-CTS reroute: "
+                    f"route_cts_host={normalized_route_cts_host} route_error={route_error}; "
+                    f"anchor_cts_host={normalized_anchor_cts_host} anchor_error={anchor_error}",
+                ) from anchor_error
+            self._log(
+                "info",
+                self._members_sync_rerouted_event_type(chat_kind),
+                migration_id=migration_id,
+                source_chat_id=source_chat_id,
+                target_chat_id=target_chat_id,
+                route_cts_host=normalized_route_cts_host,
+                fallback_cts_host=normalized_anchor_cts_host,
+                participant_huids=participant_huids,
+                reason="route_chat_not_found",
+                route_error_type=type(route_error).__name__,
+                route_error=str(route_error),
+            )
+            await self._audit_repository.add(
+                AuditEvent(
+                    migration_id=migration_id,
+                    source_chat_id=source_chat_id,
+                    event_type=self._members_sync_rerouted_event_type(chat_kind),
+                    severity=AuditSeverity.INFO,
+                    payload_json={
+                        "target_chat_id": target_chat_id,
+                        "route_cts_host": normalized_route_cts_host,
+                        "fallback_cts_host": normalized_anchor_cts_host,
+                        "participant_huids": participant_huids,
+                        "reason": "route_chat_not_found",
+                        "route_error": str(route_error),
+                    },
+                    created_at=self._now(),
+                ),
+            )
+            return newly_added, normalized_anchor_cts_host
+
+    async def _ensure_chat_members_via_cts_host(
+        self,
+        *,
+        cts_host: str | None,
+        target_chat_id: str,
+        participant_huids: list[str],
+    ) -> tuple[str, ...]:
+        with self._use_cts_host(cts_host):
+            return await self._retry_policy.run(
+                lambda participant_huids=participant_huids: self._express_gateway.ensure_chat_members(
+                    target_chat_id,
+                    participant_huids,
+                ),
+            )
+
+    def _should_retry_member_sync_via_anchor(
+        self,
+        *,
+        error: FatalItemError,
+        route_cts_host: str | None,
+        anchor_cts_host: str | None,
+    ) -> bool:
+        normalized_route_cts_host = normalize_express_cts_host(route_cts_host)
+        normalized_anchor_cts_host = normalize_express_cts_host(anchor_cts_host)
+        if (
+            normalized_route_cts_host is None
+            or normalized_anchor_cts_host is None
+            or normalized_route_cts_host == normalized_anchor_cts_host
+        ):
+            return False
+        return self._is_chat_not_found_error(error)
+
+    def _is_chat_not_found_error(self, error: BaseException) -> bool:
+        current: BaseException | None = error
+        while current is not None:
+            if type(current).__name__ == "ChatNotFoundError":
+                return True
+            normalized_message = str(current).strip().lower()
+            if (
+                "chat_not_found" in normalized_message
+                or "chat with specified id not found" in normalized_message
+            ):
+                return True
+            next_error = current.__cause__
+            if next_error is current:
+                break
+            current = next_error
 
     async def _ensure_initiator_chat_admin(
         self,
@@ -1714,6 +1837,9 @@ class TargetChatProvisioningService:
 
     def _members_sync_degraded_event_type(self, chat_kind: str) -> str:
         return "channel_members_sync_degraded" if chat_kind == "channel" else "target_chat_members_sync_degraded"
+
+    def _members_sync_rerouted_event_type(self, chat_kind: str) -> str:
+        return "channel_members_sync_rerouted" if chat_kind == "channel" else "target_chat_members_sync_rerouted"
 
     def _initiator_admin_synced_event_type(self, chat_kind: str) -> str:
         return "channel_initiator_admin_synced" if chat_kind == "channel" else "target_chat_initiator_admin_synced"
