@@ -397,6 +397,25 @@ class PybotxExpressGateway:
                 chat_id=chat_uuid,
                 huids=missing,
             )
+            refreshed_chat_info = await self._bot.chat_info(
+                bot_id=self._bot_id,
+                chat_id=chat_uuid,
+            )
+            refreshed_members = {
+                str(member.huid)
+                for member in refreshed_chat_info.members
+            }
+            missing_after_add = [
+                huid
+                for huid in missing
+                if str(huid) not in refreshed_members
+            ]
+            if missing_after_add:
+                raise FatalItemError(
+                    "eXpress ensure_chat_members verification failed: "
+                    "members not visible after add_users_to_chat; "
+                    f"missing_huids={missing_after_add}",
+                )
         except (RateLimitReachedError, CallbackNotReceivedError) as error:
             raise RecoverableItemError(
                 f"temporary eXpress ensure_chat_members failure: {error}",

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from uuid import UUID
 
 import httpx
 import pytest
@@ -52,6 +53,44 @@ class StubBot:
             },
         )
         return SimpleNamespace(huid="other-user-huid")
+
+
+class MembershipStubBot:
+    def __init__(
+        self,
+        *,
+        existing_member_huids: list[str] | None = None,
+        confirm_added_huids: bool = True,
+    ) -> None:
+        self._members = [
+            SimpleNamespace(huid=UUID(huid), is_admin=False)
+            for huid in (existing_member_huids or [])
+        ]
+        self._confirm_added_huids = confirm_added_huids
+        self.add_calls: list[dict[str, object]] = []
+
+    async def chat_info(self, *, bot_id, chat_id):
+        return SimpleNamespace(members=list(self._members))
+
+    async def add_users_to_chat(self, *, bot_id, chat_id, huids):
+        self.add_calls.append(
+            {
+                "bot_id": bot_id,
+                "chat_id": chat_id,
+                "huids": list(huids),
+            },
+        )
+        if not self._confirm_added_huids:
+            return
+        existing = {str(member.huid) for member in self._members}
+        for huid in huids:
+            normalized = str(huid)
+            if normalized in existing:
+                continue
+            self._members.append(
+                SimpleNamespace(huid=UUID(normalized), is_admin=False)
+            )
+            existing.add(normalized)
 
 
 def _malformed_staged_file_transport(request: httpx.Request) -> httpx.Response:
@@ -304,3 +343,50 @@ async def test_search_user_by_other_id_uses_pybotx_search_user_by_other_id() -> 
 
     assert result == "other-user-huid"
     assert bot.calls[-1]["other_id"] == "hr-123"
+
+
+@pytest.mark.asyncio
+async def test_ensure_chat_members_returns_only_confirmed_members() -> None:
+    bot = MembershipStubBot(
+        existing_member_huids=["6367c7c9-6dec-5960-8aa8-6b6c6b57048e"],
+    )
+    gateway = PybotxExpressGateway(
+        bot_id="043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+        cts_url="https://cts11dev.ccsteam.ru/",
+        secret_key="secret",
+        bot=bot,
+    )
+
+    added = await gateway.ensure_chat_members(
+        "043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+        [
+            "6367c7c9-6dec-5960-8aa8-6b6c6b57048e",
+            "b7ceffbf-6f4f-4f23-87d0-8a61d4d2ea61",
+        ],
+    )
+
+    assert added == ("b7ceffbf-6f4f-4f23-87d0-8a61d4d2ea61",)
+    assert bot.add_calls == [
+        {
+            "bot_id": UUID("043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9"),
+            "chat_id": UUID("043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9"),
+            "huids": [UUID("b7ceffbf-6f4f-4f23-87d0-8a61d4d2ea61")],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ensure_chat_members_raises_when_add_is_not_confirmed() -> None:
+    bot = MembershipStubBot(confirm_added_huids=False)
+    gateway = PybotxExpressGateway(
+        bot_id="043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+        cts_url="https://cts11dev.ccsteam.ru/",
+        secret_key="secret",
+        bot=bot,
+    )
+
+    with pytest.raises(Exception, match="members not visible after add_users_to_chat"):
+        await gateway.ensure_chat_members(
+            "043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+            ["b7ceffbf-6f4f-4f23-87d0-8a61d4d2ea61"],
+        )

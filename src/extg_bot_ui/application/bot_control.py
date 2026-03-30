@@ -2223,13 +2223,15 @@ class MigrationBotControlService:
         anchor_cts_host = self._resolve_manifest_anchor_cts_host(
             manifest,
             source_chat_ids=source_chat_ids,
-        ) or normalize_express_cts_host(
-            operator.current_cts_host or get_current_express_cts_host(),
+        ) or self._default_anchor_cts_host(
+            operator=operator,
         )
         anchor_bot_id = self._resolve_manifest_anchor_bot_id(
             manifest,
             source_chat_ids=source_chat_ids,
-        ) or ((operator.current_bot_id or "").strip() or None)
+        ) or self._configured_bot_id_for_cts_host(anchor_cts_host) or (
+            (operator.current_bot_id or "").strip() or None
+        )
         registered = await self._migration_job_repository.enqueue(
             MigrationJobRecord(
                 job_key=job.job_key,
@@ -3467,7 +3469,9 @@ class MigrationBotControlService:
     ) -> str | None:
         if existing is not None and existing.anchor_cts_host:
             return normalize_express_cts_host(existing.anchor_cts_host)
-        return normalize_express_cts_host(
+        return self._default_anchor_cts_host(
+            operator=operator,
+        ) or normalize_express_cts_host(
             operator.current_cts_host or get_current_express_cts_host(),
         )
 
@@ -3479,9 +3483,44 @@ class MigrationBotControlService:
     ) -> str | None:
         if existing is not None and existing.anchor_bot_id:
             return existing.anchor_bot_id
+        if existing is not None and existing.anchor_cts_host:
+            configured = self._configured_bot_id_for_cts_host(existing.anchor_cts_host)
+            if configured is not None:
+                return configured
+        configured = self._configured_bot_id_for_cts_host(
+            self._default_anchor_cts_host(operator=operator),
+        )
+        if configured is not None:
+            return configured
         raw_bot_id = operator.current_bot_id
         normalized = str(raw_bot_id).strip() if raw_bot_id is not None else ""
         return normalized or None
+
+    def _default_anchor_cts_host(
+        self,
+        *,
+        operator: BotOperatorContext,
+    ) -> str | None:
+        primary_cts_host = normalize_express_cts_host(
+            getattr(self._express_gateway, "primary_cts_host", None),
+        )
+        if primary_cts_host is not None:
+            return primary_cts_host
+        return normalize_express_cts_host(
+            operator.current_cts_host or get_current_express_cts_host(),
+        )
+
+    def _configured_bot_id_for_cts_host(
+        self,
+        cts_host: str | None,
+    ) -> str | None:
+        getter = getattr(self._express_gateway, "bot_id_for_cts_host", None)
+        if not callable(getter):
+            return None
+        normalized = normalize_express_cts_host(cts_host)
+        value = getter(normalized)
+        normalized_bot_id = str(value).strip() if value is not None else ""
+        return normalized_bot_id or None
 
     def _member_add_effective_result(
         self,

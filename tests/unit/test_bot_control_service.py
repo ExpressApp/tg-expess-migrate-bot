@@ -971,6 +971,74 @@ async def test_start_migrate_chat_persists_anchor_fields_and_worker_uses_them():
 
 
 @pytest.mark.asyncio
+async def test_start_migrate_chat_prefers_primary_anchor_when_gateway_is_routing_aware():
+    class RoutingAwareBackfillUseCase(StubUseCase):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.observed_hosts: list[str | None] = []
+
+        async def execute(self, command):
+            self.commands.append(command)
+            self.observed_hosts.append(get_current_express_cts_host())
+            self.called.set()
+            return None
+
+    class RoutingAwareExpressGateway(FakeExpressGateway):
+        primary_cts_host = "cts1.example"
+
+        def bot_id_for_cts_host(self, cts_host: str | None) -> str | None:
+            if cts_host == "cts1.example":
+                return "bot-cts1"
+            if cts_host == "cts2.example":
+                return "bot-cts2"
+            return None
+
+    backfill_use_case = RoutingAwareBackfillUseCase()
+    service, _ = build_service(
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+        backfill_use_case=backfill_use_case,
+        express_gateway=RoutingAwareExpressGateway(),
+    )
+
+    result = await service.start_migrate_chat(
+        operator=BotOperatorContext(
+            huid="operator-1",
+            chat_id="operator-chat",
+            current_cts_host="cts2.example",
+            current_bot_id="bot-cts2",
+        ),
+        source_chat_id="chat-1",
+        options=MigrationRunOptions(progress_policy="resume"),
+    )
+
+    assert result.status == "accepted"
+    config = await service._chat_migration_config_repository.get(
+        "migration-bot-dynamic",
+        "chat-1",
+    )
+    assert config is not None
+    assert config.anchor_cts_host == "cts1.example"
+    assert config.anchor_bot_id == "bot-cts1"
+
+    queued_job = await service._migration_job_repository.get(result.job_key)
+    assert queued_job is not None
+    assert queued_job.anchor_cts_host == "cts1.example"
+    assert queued_job.anchor_bot_id == "bot-cts1"
+
+    claimed_job = await service._migration_job_repository.acquire_next(
+        worker_id="test-worker",
+        lease_duration_seconds=30.0,
+    )
+    assert claimed_job is not None
+    await service.execute_migration_job(claimed_job)
+    await asyncio.wait_for(backfill_use_case.called.wait(), timeout=1)
+    assert backfill_use_case.commands
+    assert backfill_use_case.observed_hosts == ["cts1.example"]
+
+
+@pytest.mark.asyncio
 async def test_start_migrate_chat_accepts_uuid_operator_bot_id() -> None:
     service, _ = build_service(
         telegram_session_service=StubTelegramSessionService(
