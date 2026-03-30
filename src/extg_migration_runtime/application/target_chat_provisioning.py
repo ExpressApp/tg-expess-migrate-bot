@@ -1691,6 +1691,43 @@ class TargetChatProvisioningService:
             ) from error
         except (RecoverableItemError, AmbiguousDeliveryError):
             raise
+        try:
+            await self._ensure_helper_bot_route_admin_ready(
+                target_chat_id=target_chat_id,
+                route_cts_host=normalized_route_cts_host,
+                helper_bot_huid=helper_bot_huid,
+            )
+        except FatalItemError as error:
+            await self._audit_repository.add(
+                AuditEvent(
+                    migration_id=migration_id,
+                    source_chat_id=source_chat_id,
+                    event_type=self._helper_bot_attach_degraded_event_type(chat_kind),
+                    severity=AuditSeverity.WARNING,
+                    payload_json={
+                        "target_chat_id": target_chat_id,
+                        "helper_cts_host": normalized_route_cts_host,
+                        "helper_bot_huid": helper_bot_huid,
+                        "anchor_cts_host": normalized_anchor_cts_host,
+                        "stage": "route_admin_visibility",
+                        "error": str(error),
+                    },
+                    created_at=self._now(),
+                ),
+            )
+            raise FatalItemError(
+                "helper bot route membership route-admin visibility failed: "
+                f"helper_cts_host={normalized_route_cts_host} "
+                f"anchor_cts_host={normalized_anchor_cts_host} "
+                f"helper_bot_huid={helper_bot_huid}; error={error}",
+            ) from error
+        except (RecoverableItemError, AmbiguousDeliveryError) as error:
+            raise FatalItemError(
+                "helper bot route membership route-admin visibility did not converge: "
+                f"helper_cts_host={normalized_route_cts_host} "
+                f"anchor_cts_host={normalized_anchor_cts_host} "
+                f"helper_bot_huid={helper_bot_huid}; error={error}",
+            ) from error
         await self._audit_repository.add(
             AuditEvent(
                 migration_id=migration_id,
@@ -1704,10 +1741,32 @@ class TargetChatProvisioningService:
                     "anchor_cts_host": normalized_anchor_cts_host,
                     "attached_huids": list(attached_huids),
                     "promoted_admin_huids": list(promoted_admin_huids),
+                    "route_admin_confirmed_cts_host": normalized_route_cts_host,
                 },
                 created_at=self._now(),
             ),
         )
+
+    async def _ensure_helper_bot_route_admin_ready(
+        self,
+        *,
+        target_chat_id: str,
+        route_cts_host: str,
+        helper_bot_huid: str,
+    ) -> None:
+        async def _assert_route_admin_visible() -> None:
+            with self._use_cts_host(route_cts_host):
+                admin_huids = await self._express_gateway.list_chat_admin_huids(target_chat_id)
+            if helper_bot_huid not in admin_huids:
+                raise RecoverableItemError(
+                    "helper bot route admin visibility is not ready yet: "
+                    f"route_cts_host={route_cts_host} "
+                    f"target_chat_id={target_chat_id} "
+                    f"helper_bot_huid={helper_bot_huid} "
+                    f"visible_admin_huids={list(admin_huids)}",
+                )
+
+        await self._retry_policy.run(_assert_route_admin_visible)
 
     async def _emit_access_link(
         self,

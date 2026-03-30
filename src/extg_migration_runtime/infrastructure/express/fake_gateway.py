@@ -187,6 +187,15 @@ class FakeExpressGateway:
         )
         return tuple(promoted)
 
+    async def list_chat_admin_huids(
+        self,
+        target_chat_id: str,
+    ) -> tuple[str, ...]:
+        chat = self._created_chats.get(target_chat_id)
+        if chat is None:
+            raise RecoverableItemError("target chat was not found in fake express gateway")
+        return tuple(chat.admin_huids)
+
     async def send_message(
         self,
         target_chat_id: str,

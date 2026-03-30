@@ -194,6 +194,12 @@ class ExpressGateway(Protocol):
     ) -> tuple[str, ...]:
         """Ensure target chat admins include the provided members and return newly promoted HUIDs."""
 
+    async def list_chat_admin_huids(
+        self,
+        target_chat_id: str,
+    ) -> tuple[str, ...]:
+        """List current target chat admin HUIDs visible to the active bot account."""
+
     async def ensure_personal_chat(
         self,
         user_huid: str,

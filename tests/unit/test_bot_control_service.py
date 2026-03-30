@@ -2964,6 +2964,68 @@ async def test_status_filters_foreign_chats_and_jobs():
 
 
 @pytest.mark.asyncio
+async def test_status_includes_archive_import_chats_marked_skip_in_all():
+    service, _ = build_service(
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+    )
+    await service._chat_migration_config_repository.save(
+        ChatMigrationConfigRecord(
+            migration_id="migration-bot-dynamic",
+            source_chat_id="archive:1",
+            source_chat_type="group",
+            source_chat_title="Archive Chat",
+            source_backend="telegram_export_archive",
+            target_strategy="create",
+            target_title="Imported Archive Chat",
+            target_chat_id=None,
+            include_from=None,
+            include_to=None,
+            migrate_media=False,
+            reply_mode="inline_quote",
+            identity_policy="display_only",
+            access_strategy="direct_add",
+            updated_by_huid="operator-1",
+            created_at=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+            skip_in_all=True,
+        ),
+    )
+    service._reconcile_migration_use_case.result = ReconcileMigrationResult(
+        migration_id="migration-bot-dynamic",
+        chats_total=1,
+        attention_chats=0,
+        inventory_missing_chats=0,
+        source_messages_total_known=42,
+        imported_count=42,
+        failed_count=0,
+        ambiguous_count=0,
+        processing_count=0,
+        mapped_total=42,
+        gap_total_known=0,
+        source_media_total_known=0,
+        attachment_imported_count=0,
+        attachment_failed_count=0,
+        attachment_ambiguous_count=0,
+        attachment_processing_count=0,
+        attachment_skipped_count=0,
+        attachment_mapped_total=0,
+        chats=[],
+    )
+
+    result = await service.status(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+    )
+
+    assert [
+        dialog.source_chat_id
+        for dialog in service._reconcile_migration_use_case.commands[0].manifest.dialogs
+    ] == ["archive:1"]
+    assert [checkpoint.source_chat_id for checkpoint in result.chat_checkpoints] == ["archive:1"]
+
+
+@pytest.mark.asyncio
 async def test_prepare_chat_members_workbook_includes_manual_template_rows():
     telegram_gateway = StubTelegramGateway(
         dialogs=[

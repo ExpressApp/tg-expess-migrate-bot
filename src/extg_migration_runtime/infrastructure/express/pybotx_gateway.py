@@ -539,6 +539,43 @@ class PybotxExpressGateway:
             ) from error
         return tuple(str(huid) for huid in missing_admins)
 
+    async def list_chat_admin_huids(
+        self,
+        target_chat_id: str,
+    ) -> tuple[str, ...]:
+        chat_uuid = self._parse_uuid(target_chat_id, setting_name="target_chat_id")
+        try:
+            chat_info = await self._bot.chat_info(
+                bot_id=self._bot_id,
+                chat_id=chat_uuid,
+            )
+        except (RateLimitReachedError, CallbackNotReceivedError) as error:
+            raise RecoverableItemError(
+                f"temporary eXpress list_chat_admin_huids failure: {error}",
+            ) from error
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            raise RecoverableItemError(
+                f"pre-send eXpress network failure during list_chat_admin_huids: {error}",
+            ) from error
+        except (
+            ChatNotFoundError,
+            PermissionDeniedError,
+            InvalidBotAccountError,
+            BaseClientError,
+        ) as error:
+            raise FatalItemError(
+                f"eXpress list_chat_admin_huids failed: {error}",
+            ) from error
+        except (httpx.TimeoutException, httpx.NetworkError, OSError) as error:
+            raise AmbiguousDeliveryError(
+                f"list_chat_admin_huids result is ambiguous after transport failure: {error}",
+            ) from error
+        return tuple(
+            str(member.huid)
+            for member in chat_info.members
+            if member.is_admin
+        )
+
     async def send_message(
         self,
         target_chat_id: str,

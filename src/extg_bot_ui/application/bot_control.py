@@ -1854,6 +1854,7 @@ class MigrationBotControlService:
             operator_huid=operator.huid,
             source_chat_id=source_chat_id,
             require_configured=source_chat_id is not None,
+            include_skipped_in_all=source_chat_id is None,
         )
         relevant_chat_ids = [
             dialog.source_chat_id
@@ -3070,12 +3071,14 @@ class MigrationBotControlService:
         operator_huid: str | None = None,
         source_chat_id: str | None = None,
         require_configured: bool = False,
+        include_skipped_in_all: bool = False,
     ) -> MigrationManifest:
         source_chat_ids = (source_chat_id,) if source_chat_id is not None else None
         return await self._load_config_manifest(
             operator_huid=operator_huid,
             source_chat_ids=source_chat_ids,
             require_configured=require_configured,
+            include_skipped_in_all=include_skipped_in_all,
         )
 
     async def _load_config_manifest(
@@ -3084,6 +3087,7 @@ class MigrationBotControlService:
         operator_huid: str | None = None,
         source_chat_ids: tuple[str, ...] | None = None,
         require_configured: bool = True,
+        include_skipped_in_all: bool = False,
     ) -> MigrationManifest:
         migration_id = self._require_configured_migration_id()
         configs = await self._chat_migration_config_repository.list_by_migration(migration_id)
@@ -3110,7 +3114,7 @@ class MigrationBotControlService:
                 record
                 for record in owned_configs
                 if not self._is_split_root_config(record)
-                and not record.skip_in_all
+                and (include_skipped_in_all or not record.skip_in_all)
             ]
         else:
             selected = []

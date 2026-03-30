@@ -45,6 +45,11 @@ class _ExpressGatewayLike(Protocol):
         participant_huids: list[str],
     ) -> tuple[str, ...]: ...
 
+    async def list_chat_admin_huids(
+        self,
+        target_chat_id: str,
+    ) -> tuple[str, ...]: ...
+
     async def ensure_personal_chat(
         self,
         user_huid: str,
@@ -179,6 +184,12 @@ class ExpressGatewayRouter:
             target_chat_id,
             participant_huids,
         )
+
+    async def list_chat_admin_huids(
+        self,
+        target_chat_id: str,
+    ) -> tuple[str, ...]:
+        return await self._current_gateway().list_chat_admin_huids(target_chat_id)
 
     async def ensure_personal_chat(
         self,
