@@ -284,7 +284,7 @@ deploy.botstest:
   image: registry.ccsteam.ru/cicd-images/docker:latest
   stage: deploy
   tags:
-    - bts-dev-bots
+    - bots-test-new
   rules:
     - if: $CI_COMMIT_BRANCH
   when: manual

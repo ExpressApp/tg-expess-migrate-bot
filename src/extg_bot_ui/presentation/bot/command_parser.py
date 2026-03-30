@@ -67,6 +67,24 @@ def parse_migrate_chat_options(argument: str) -> tuple[str, MigrationRunOptions]
     return source_chat_id, _to_run_options(parsed)
 
 
+def parse_optional_migrate_chat_options(argument: str) -> tuple[str | None, MigrationRunOptions]:
+    parsed = parse_arguments(argument)
+    source_chat_id = parsed.options.pop("chat", None)
+    if source_chat_id is None:
+        if parsed.positionals:
+            source_chat_id = parsed.positionals[0]
+            if len(parsed.positionals) > 1:
+                raise CommandArgumentError("too many positional arguments")
+            parsed = ParsedArguments(positionals=(), options=dict(parsed.options))
+        else:
+            if parsed.options:
+                raise CommandArgumentError("source chat id is required when options are provided")
+            return None, MigrationRunOptions()
+    elif parsed.positionals:
+        raise CommandArgumentError("use either positional source_chat_id or chat=<id>")
+    return source_chat_id, _to_run_options(parsed)
+
+
 def parse_optional_source_chat_id(argument: str) -> str | None:
     parsed = parse_arguments(argument)
     if "chat" in parsed.options:

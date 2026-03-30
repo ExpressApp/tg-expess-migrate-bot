@@ -101,6 +101,40 @@ async def test_migration_job_worker_completes_queued_job():
 
 
 @pytest.mark.asyncio
+async def test_migration_job_worker_completes_job_claimed_by_another_worker_id():
+    repository = InMemoryMigrationJobRepository()
+    await repository.enqueue(build_job(job_key="job-claimed"))
+    claimed = await repository.claim(
+        job_key="job-claimed",
+        worker_id="command-handler-worker",
+        lease_duration_seconds=30.0,
+    )
+    assert claimed is not None
+    audit_repository = StubAuditRepository()
+    service = StubBotControlService()
+    worker = MigrationJobWorker(
+        migration_job_repository=repository,
+        bot_control_service=service,
+        audit_repository=audit_repository,
+        logger=StubLogger(),
+        concurrency=1,
+        poll_interval_seconds=0.01,
+        lease_duration_seconds=30.0,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    await worker.execute_claimed_job(claimed)
+
+    job_record = await repository.get("job-claimed")
+    assert service.executed_jobs == ["job-claimed"]
+    assert job_record is not None
+    assert job_record.status is MigrationJobStatus.COMPLETED
+    assert job_record.worker_id == "command-handler-worker"
+    assert audit_repository.events[-1].event_type == "bot_migration_job_completed"
+    assert audit_repository.events[-1].severity is AuditSeverity.INFO
+
+
+@pytest.mark.asyncio
 async def test_migration_job_worker_marks_failed_job():
     repository = InMemoryMigrationJobRepository()
     await repository.enqueue(build_job(job_key="job-2"))

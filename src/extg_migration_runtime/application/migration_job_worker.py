@@ -106,12 +106,17 @@ class MigrationJobWorker:
             await self._sleep(self._poll_interval_seconds)
 
     async def execute_claimed_job(self, job: MigrationJobRecord) -> None:
+        # `worker_id` in the job record is the current lease owner token.
+        # Reuse it for heartbeat and terminal updates even when the executor
+        # differs from the component that originally claimed the job.
+        lease_owner_id = job.worker_id or self._worker_id
         cancel_requested = asyncio.Event()
         current_task = asyncio.current_task()
         assert current_task is not None
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(
                 job.job_key,
+                lease_owner_id=lease_owner_id,
                 cancel_requested=cancel_requested,
                 task_to_cancel=current_task,
             ),
@@ -123,7 +128,7 @@ class MigrationJobWorker:
             if cancel_requested.is_set():
                 await self._migration_job_repository.mark_failed(
                     job_key=job.job_key,
-                    worker_id=self._worker_id,
+                    worker_id=lease_owner_id,
                     error_code=MIGRATION_JOB_CANCELLED_ERROR_CODE,
                     error_payload={"requested_by": job.operator_huid},
                 )
@@ -160,7 +165,7 @@ class MigrationJobWorker:
             )
             await self._migration_job_repository.mark_failed(
                 job_key=job.job_key,
-                worker_id=self._worker_id,
+                worker_id=lease_owner_id,
                 error_code=type(error).__name__,
                 error_payload={"error": str(error)},
             )
@@ -185,7 +190,7 @@ class MigrationJobWorker:
 
         await self._migration_job_repository.mark_completed(
             job_key=job.job_key,
-            worker_id=self._worker_id,
+            worker_id=lease_owner_id,
         )
         await self._audit_repository.add(
             AuditEvent(
@@ -205,6 +210,7 @@ class MigrationJobWorker:
         self,
         job_key: str,
         *,
+        lease_owner_id: str,
         cancel_requested: asyncio.Event,
         task_to_cancel: asyncio.Task[None],
     ) -> None:
@@ -224,13 +230,14 @@ class MigrationJobWorker:
                 return
             updated = await self._migration_job_repository.heartbeat(
                 job_key=job_key,
-                worker_id=self._worker_id,
+                worker_id=lease_owner_id,
                 lease_duration_seconds=self._lease_duration_seconds,
             )
             if not updated:
                 self._logger.warning(
                     "migration job heartbeat lost lease",
                     worker_id=self._worker_id,
+                    lease_owner_id=lease_owner_id,
                     job_key=job_key,
                 )
                 return

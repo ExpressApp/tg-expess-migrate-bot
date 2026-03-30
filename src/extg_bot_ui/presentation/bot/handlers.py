@@ -44,6 +44,7 @@ from extg_bot_ui.presentation.bot.command_parser import (
     parse_map_identity_arguments,
     parse_migrate_all_options,
     parse_migrate_chat_options,
+    parse_optional_migrate_chat_options,
     parse_optional_source_chat_id,
     parse_replay_failed_options,
 )
@@ -179,9 +180,17 @@ def build_handler_collector(
     @collector.command("/configure", description="Показать или сохранить конфигурацию переноса")
     async def configure_chat(message: IncomingMessage, bot: Bot) -> None:
         try:
-            source_chat_id, options = parse_migrate_chat_options(message.argument)
+            source_chat_id, options = parse_optional_migrate_chat_options(message.argument)
+            if source_chat_id is None:
+                chats = await service.list_available_chats(
+                    operator=_operator_from_message(message),
+                    limit=10,
+                    query=None,
+                )
+                await _reply(bot, _format_configure_chat_selector(chats))
+                return
             if _is_show_configuration_request(options):
-                result = await service.show_chat(
+                result = await service.show_or_configure_chat(
                     operator=_operator_from_message(message),
                     source_chat_id=source_chat_id,
                 )
@@ -642,20 +651,30 @@ def _format_migrated_chats(chats: tuple[BotMigratedChat, ...]) -> str:
 
 
 def _format_chat_members_add_result(result: BotChatMembersAddResult) -> str:
-    return (
-        "Пользователи обработаны.\n"
-        f"source_chat_id={result.source_chat_id}\n"
-        f"target_chat_id={result.target_chat_id}\n"
-        f"target_chat_title={result.target_chat_title}\n"
-        f"access_strategy={result.access_strategy}\n"
-        f"processed_rows={result.processed_rows}\n"
-        f"imported_identity_mappings={result.imported_identity_mappings}\n"
-        f"mapping_skipped_rows={result.mapping_skipped_rows}\n"
-        f"resolved_targets={result.resolved_targets}\n"
-        f"direct_added={result.direct_added}\n"
-        f"invited={result.invited}\n"
-        f"skipped_rows={result.skipped_rows}"
+    lines = [
+        "Пользователи обработаны.",
+        f"source_chat_id={result.source_chat_id}",
+        f"target_chat_id={result.target_chat_id}",
+        f"target_chat_title={result.target_chat_title}",
+        f"requested_access_strategy={result.access_strategy}",
+        f"effective_result={result.effective_result}",
+    ]
+    if result.invite_fallback_used:
+        lines.append(
+            "note=direct_add could not add all users; invite_link fallback was used",
+        )
+    lines.extend(
+        [
+            f"processed_rows={result.processed_rows}",
+            f"imported_identity_mappings={result.imported_identity_mappings}",
+            f"mapping_skipped_rows={result.mapping_skipped_rows}",
+            f"resolved_targets={result.resolved_targets}",
+            f"direct_added={result.direct_added}",
+            f"invited={result.invited}",
+            f"skipped_rows={result.skipped_rows}",
+        ],
     )
+    return "\n".join(lines)
 
 
 def _format_status_result(result: MigrationBotStatusResult) -> str:
@@ -690,16 +709,25 @@ def _format_status_result(result: MigrationBotStatusResult) -> str:
 
 
 def _format_stats_result(result: BotMigrationStatsResult) -> str:
-    return (
-        f"migration_id={result.migration_id}\n"
-        f"configured_chats={result.configured_chats}\n"
-        f"skipped_in_all={result.skipped_in_all_chats}\n"
-        f"chats_with_progress={result.chats_with_progress}\n"
-        f"active_jobs={result.active_jobs}\n"
-        f"attention_chats={result.attention_chats}\n"
-        f"messages imported={result.imported_messages} failed={result.failed_messages} ambiguous={result.ambiguous_messages}\n"
-        f"attachments imported={result.imported_attachments} failed={result.failed_attachments}"
-    )
+    lines = [
+        f"migration_id={result.migration_id}",
+        f"configured_chats={result.configured_chats}",
+        f"foreign_managed_chats={result.foreign_managed_chats}",
+        f"skipped_in_all={result.skipped_in_all_chats}",
+        f"chats_with_progress={result.chats_with_progress}",
+        f"active_jobs={result.active_jobs}",
+        f"attention_chats={result.attention_chats}",
+        (
+            f"messages imported={result.imported_messages} "
+            f"failed={result.failed_messages} ambiguous={result.ambiguous_messages}"
+        ),
+        f"attachments imported={result.imported_attachments} failed={result.failed_attachments}",
+    ]
+    if result.foreign_managed_chats:
+        lines.append(
+            "note=some source chats are already configured by other operators and are excluded from your stats",
+        )
+    return "\n".join(lines)
 
 
 def _format_cancel_result(result: BotCancelResult) -> str:
@@ -738,6 +766,32 @@ def _format_replay_failed_result(result: ReplayFailedResult) -> str:
         f"missing={result.missing_count}\n"
         f"skipped={result.skipped_count}"
     )
+
+
+def _format_configure_chat_selector(chats: tuple[BotAvailableChat, ...]) -> str:
+    if not chats:
+        return "Доступные Telegram-чаты не найдены. Проверь /connect и затем попробуй /chats."
+    lines = [
+        "Укажи source_chat_id: `/configure <source_chat_id>`.",
+        "Первые доступные чаты:",
+    ]
+    for chat in chats[:10]:
+        lines.append(
+            f"- {chat.source_chat_id} | {chat.source_chat_title} "
+            f"| configured={'yes' if chat.configured else 'no'}",
+        )
+    if len(chats) > 10:
+        lines.append(f"... +{len(chats) - 10} chats")
+    lines.extend(
+        [
+            "",
+            "Подсказки:",
+            "- `/configure <source_chat_id>` без опций покажет существующий config или создаст новый с дефолтами.",
+            "- `/configure <source_chat_id> access=invite format=source_id media=off` сохранит указанные параметры.",
+            "- Для полного списка используй `/chats`.",
+        ],
+    )
+    return "\n".join(lines)
 
 
 def _format_progress_hints(progress_hints: tuple[BotProgressHint, ...]) -> str:
@@ -801,7 +855,7 @@ def _help_text() -> str:
         "/chat_users <source_chat_id>\n"
         "/add_users [source_chat_id]\n"
         "/import_archive\n"
-        "/configure <source_chat_id> [access=invite|link] [format=quote|source_id|none] [media=on|off] [skip=on|off] [from=ISO] [to=ISO]\n"
+        "/configure [source_chat_id] [access=invite|link] [format=quote|source_id|none] [media=on|off] [skip=on|off] [from=ISO] [to=ISO]\n"
         "/migrate <source_chat_id>\n"
         "/remigrate <source_chat_id>\n"
         "/migrate_all\n"
@@ -811,7 +865,8 @@ def _help_text() -> str:
         "/cancel [source_chat_id]\n\n"
         "Поведение по умолчанию:\n"
         "- /migrate_all автоматически создаст недостающие конфиги с access=link и стандартным форматом.\n"
-        "- /configure <source_chat_id> без опций покажет текущую конфигурацию.\n"
+        "- /configure без аргументов покажет доступные source_chat_id.\n"
+        "- /configure <source_chat_id> без опций покажет текущую конфигурацию, а если ее еще нет — создаст с дефолтами.\n"
         "- /add_users откроет отдельный flow добавления пользователей в уже мигрированный target chat через Excel-матрицу.\n"
         "- /import_archive откроет отдельный flow: загрузи Telegram export (.json/.zip/.rar), бот создаст чат, сделает инициатора админом и перенесет только текстовые сообщения без участников и без вложений.\n"
         "- /migrate и /remigrate продолжают перенос с текущего безопасного смещения.\n"

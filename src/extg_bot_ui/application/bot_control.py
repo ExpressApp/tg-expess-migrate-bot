@@ -307,6 +307,8 @@ class BotChatMembersAddResult:
     target_chat_id: str
     target_chat_title: str
     access_strategy: str
+    effective_result: str
+    invite_fallback_used: bool
     processed_rows: int
     imported_identity_mappings: int
     mapping_skipped_rows: int
@@ -372,6 +374,7 @@ class MigrationBotStatusResult:
 class BotMigrationStatsResult:
     migration_id: str
     configured_chats: int
+    foreign_managed_chats: int
     skipped_in_all_chats: int
     active_jobs: int
     chats_with_progress: int
@@ -576,6 +579,27 @@ class MigrationBotControlService:
             operator_huid=operator.huid,
         )
         return await self._chat_configuration_result(record)
+
+    async def show_or_configure_chat(
+        self,
+        *,
+        operator: BotOperatorContext,
+        source_chat_id: str,
+    ) -> BotChatConfigurationResult:
+        await self._authorize(operator)
+        migration_id = self._require_configured_migration_id()
+        existing = await self._chat_migration_config_repository.get(migration_id, source_chat_id)
+        if existing is not None:
+            self._ensure_operator_owns_chat_config(
+                record=existing,
+                operator_huid=operator.huid,
+            )
+            return await self._chat_configuration_result(existing)
+        return await self.configure_chat(
+            operator=operator,
+            source_chat_id=source_chat_id,
+            options=MigrationRunOptions(),
+        )
 
     async def list_chat_users(
         self,
@@ -867,17 +891,28 @@ class MigrationBotControlService:
                     "invited": len(access_result.invited_huids),
                 },
             )
+            requested_access_strategy = binding.config.access_strategy or "direct_add"
+            direct_added_count = len(access_result.added_huids)
+            invited_count = len(access_result.invited_huids)
             return BotChatMembersAddResult(
                 source_chat_id=binding.config.source_chat_id,
                 target_chat_id=binding.mapping.target_chat_id,
                 target_chat_title=binding.mapping.target_chat_title,
-                access_strategy=binding.config.access_strategy or "direct_add",
+                access_strategy=requested_access_strategy,
+                effective_result=self._member_add_effective_result(
+                    requested_access_strategy=requested_access_strategy,
+                    direct_added=direct_added_count,
+                    invited=invited_count,
+                ),
+                invite_fallback_used=(
+                    requested_access_strategy == "direct_add" and invited_count > 0
+                ),
                 processed_rows=processed_rows,
                 imported_identity_mappings=imported_identity_mappings,
                 mapping_skipped_rows=mapping_skipped_rows,
                 resolved_targets=len(participant_targets),
-                direct_added=len(access_result.added_huids),
-                invited=len(access_result.invited_huids),
+                direct_added=direct_added_count,
+                invited=invited_count,
                 skipped_rows=skipped_rows,
             )
 
@@ -1863,7 +1898,19 @@ class MigrationBotControlService:
         operator: BotOperatorContext,
     ) -> BotMigrationStatsResult:
         await self._authorize(operator)
-        configs = await self._owned_chat_configs(operator_huid=operator.huid)
+        all_configs = await self._chat_migration_config_repository.list_by_migration(
+            self._require_configured_migration_id(),
+        )
+        configs = [
+            record
+            for record in all_configs
+            if record.updated_by_huid == operator.huid
+        ]
+        foreign_managed_chats = sum(
+            1
+            for record in all_configs
+            if record.updated_by_huid != operator.huid
+        )
         included_configs = [
             config
             for config in configs
@@ -1873,6 +1920,7 @@ class MigrationBotControlService:
             return BotMigrationStatsResult(
                 migration_id=self._require_configured_migration_id(),
                 configured_chats=len(configs),
+                foreign_managed_chats=foreign_managed_chats,
                 skipped_in_all_chats=sum(1 for config in configs if config.skip_in_all),
                 active_jobs=0,
                 chats_with_progress=0,
@@ -1901,6 +1949,7 @@ class MigrationBotControlService:
         return BotMigrationStatsResult(
             migration_id=status_result.migration_id,
             configured_chats=len(configs),
+            foreign_managed_chats=foreign_managed_chats,
             skipped_in_all_chats=sum(1 for config in configs if config.skip_in_all),
             active_jobs=len(status_result.active_jobs),
             chats_with_progress=chats_with_progress,
@@ -3433,6 +3482,24 @@ class MigrationBotControlService:
         raw_bot_id = operator.current_bot_id
         normalized = str(raw_bot_id).strip() if raw_bot_id is not None else ""
         return normalized or None
+
+    def _member_add_effective_result(
+        self,
+        *,
+        requested_access_strategy: str,
+        direct_added: int,
+        invited: int,
+    ) -> str:
+        normalized_requested = (requested_access_strategy or "direct_add").strip().lower()
+        if direct_added > 0 and invited > 0:
+            return "mixed"
+        if direct_added > 0:
+            return "direct_add"
+        if invited > 0:
+            if normalized_requested == "direct_add":
+                return "invite_link_fallback"
+            return "invite_link"
+        return "no_change"
 
     def _resolve_manifest_anchor_cts_host(
         self,

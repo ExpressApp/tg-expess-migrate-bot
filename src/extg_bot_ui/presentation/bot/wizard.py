@@ -843,20 +843,30 @@ async def begin_chat_members_workbook(
 
 
 def _format_chat_members_add_result(result: BotChatMembersAddResult) -> str:
-    return (
-        "Пользователи обработаны.\n"
-        f"source_chat_id={result.source_chat_id}\n"
-        f"target_chat_id={result.target_chat_id}\n"
-        f"target_chat_title={result.target_chat_title}\n"
-        f"access_strategy={result.access_strategy}\n"
-        f"processed_rows={result.processed_rows}\n"
-        f"imported_identity_mappings={result.imported_identity_mappings}\n"
-        f"mapping_skipped_rows={result.mapping_skipped_rows}\n"
-        f"resolved_targets={result.resolved_targets}\n"
-        f"direct_added={result.direct_added}\n"
-        f"invited={result.invited}\n"
-        f"skipped_rows={result.skipped_rows}"
+    lines = [
+        "Пользователи обработаны.",
+        f"source_chat_id={result.source_chat_id}",
+        f"target_chat_id={result.target_chat_id}",
+        f"target_chat_title={result.target_chat_title}",
+        f"requested_access_strategy={result.access_strategy}",
+        f"effective_result={result.effective_result}",
+    ]
+    if result.invite_fallback_used:
+        lines.append(
+            "note=direct_add could not add all users; invite_link fallback was used",
+        )
+    lines.extend(
+        [
+            f"processed_rows={result.processed_rows}",
+            f"imported_identity_mappings={result.imported_identity_mappings}",
+            f"mapping_skipped_rows={result.mapping_skipped_rows}",
+            f"resolved_targets={result.resolved_targets}",
+            f"direct_added={result.direct_added}",
+            f"invited={result.invited}",
+            f"skipped_rows={result.skipped_rows}",
+        ],
     )
+    return "\n".join(lines)
 
 
 def _format_background_operation_for_wizard(result: BotOperationAcceptedResult) -> str:

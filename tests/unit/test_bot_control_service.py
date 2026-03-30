@@ -1435,6 +1435,35 @@ async def test_show_chat_returns_db_config():
 
 
 @pytest.mark.asyncio
+async def test_show_or_configure_chat_bootstraps_missing_config():
+    service, _ = build_service(
+        dialogs=[
+            SourceDialog(
+                dialog_id="1057191621",
+                chat_type="private",
+                title="Direct Chat",
+                message_count=5,
+                media_count=0,
+                approximate_bytes=250,
+            ),
+        ],
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+    )
+
+    result = await service.show_or_configure_chat(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        source_chat_id="1057191621",
+    )
+
+    assert result.source_chat_id == "1057191621"
+    assert result.source_backend == "telethon_user_session"
+    assert result.target_strategy == "create"
+    assert result.target_title == "Direct Chat"
+
+
+@pytest.mark.asyncio
 async def test_configure_chat_rejects_removed_bot_api_live_backend():
     service, _ = build_service(
         dialogs=[
@@ -2719,6 +2748,45 @@ async def test_start_migrate_all_uses_only_operator_owned_configs():
     assert result.accepted_source_chat_ids == ("group-1",)
     inventory_command = service._inventory_use_case.commands[0]
     assert [dialog.source_chat_id for dialog in inventory_command.manifest.dialogs] == ["group-1"]
+
+
+@pytest.mark.asyncio
+async def test_stats_reports_foreign_managed_chats_separately():
+    service, _ = build_service(
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+        operator_huids=("operator-1", "operator-2"),
+    )
+    await service._chat_migration_config_repository.save(
+        ChatMigrationConfigRecord(
+            migration_id="migration-bot-dynamic",
+            source_chat_id="group-1",
+            source_chat_type="group",
+            source_chat_title="Group One",
+            source_backend="telethon_user_session",
+            target_strategy="create",
+            target_title="Imported Group One",
+            target_chat_id=None,
+            include_from=None,
+            include_to=None,
+            migrate_media=True,
+            reply_mode="inline_quote",
+            identity_policy="matrix_uploaded",
+            access_strategy="direct_add",
+            updated_by_huid="operator-1",
+            created_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+        ),
+    )
+
+    result = await service.stats(
+        operator=BotOperatorContext(huid="operator-2", chat_id="operator-chat"),
+    )
+
+    assert result.configured_chats == 0
+    assert result.foreign_managed_chats == 1
+    assert result.active_jobs == 0
 
 
 @pytest.mark.asyncio

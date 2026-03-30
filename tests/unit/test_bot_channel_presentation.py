@@ -178,6 +178,7 @@ class FakeBotControlService:
         self.stats_result = BotMigrationStatsResult(
             migration_id="migration-1",
             configured_chats=3,
+            foreign_managed_chats=0,
             skipped_in_all_chats=1,
             active_jobs=1,
             chats_with_progress=2,
@@ -260,6 +261,10 @@ class FakeBotControlService:
 
     async def show_chat(self, *, operator, source_chat_id: str):
         self.calls.append(("show_chat", source_chat_id, None))
+        return self.configuration_result
+
+    async def show_or_configure_chat(self, *, operator, source_chat_id: str):
+        self.calls.append(("show_or_configure_chat", source_chat_id, None))
         return self.configuration_result
 
     async def configure_chat(self, *, operator, source_chat_id: str, options: MigrationRunOptions):
@@ -641,7 +646,7 @@ async def test_list_chat_users_handler_renders_note_and_matrix_entries_for_chann
 
 
 @pytest.mark.asyncio
-async def test_configure_handler_without_options_shows_existing_configuration():
+async def test_configure_handler_without_options_shows_or_bootstraps_configuration():
     service = FakeBotControlService()
     collector = build_handler_collector(
         service=service,
@@ -654,10 +659,45 @@ async def test_configure_handler_without_options_shows_existing_configuration():
 
     await handler(message, bot)
 
-    assert service.calls == [("show_chat", "channel-1", None)]
+    assert service.calls == [("show_or_configure_chat", "channel-1", None)]
     rendered = str(bot.calls[0][0])
     assert "migration_id=migration-1" in rendered
     assert "source_chat_id=channel-1" in rendered
+
+
+@pytest.mark.asyncio
+async def test_configure_handler_without_source_chat_id_lists_available_chats():
+    service = FakeBotControlService()
+    service.available_chats = (
+        BotAvailableChat(
+            source_chat_id="channel-1",
+            source_chat_type="channel",
+            source_chat_title="Release Notes",
+            message_count=10,
+            media_count=0,
+            approximate_bytes=100,
+            configured=False,
+            has_progress=False,
+            imported_count=0,
+            mapped_total=0,
+            last_source_message_id=None,
+        ),
+    )
+    collector = build_handler_collector(
+        service=service,
+        telegram_session_service=SimpleNamespace(),
+        default_batch_size=20,
+    )
+    handler = collector._user_commands_handlers["/configure"].handler_func
+    message = FakeMessage(argument="")
+    bot = FakeBot()
+
+    await handler(message, bot)
+
+    assert service.calls == [("list_available_chats", "", "telethon_user_session")]
+    rendered = str(bot.calls[0][0])
+    assert "/configure <source_chat_id>" in rendered
+    assert "channel-1" in rendered
 
 
 @pytest.mark.asyncio

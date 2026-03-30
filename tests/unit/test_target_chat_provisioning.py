@@ -86,6 +86,14 @@ class RecoverableEnsureMembersExpressGateway(FakeExpressGateway):
         raise RecoverableItemError("temporary eXpress failure during direct add")
 
 
+class StubLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, dict[str, object]]] = []
+
+    def warning(self, event: str, **payload: object) -> None:
+        self.records.append((event, payload))
+
+
 class _SharedCrossCtsGateway:
     def __init__(
         self,
@@ -775,6 +783,7 @@ async def test_channel_chat_falls_back_to_invite_links_when_direct_add_is_fatal(
     express_gateway = FatalEnsureMembersExpressGateway(
         user_huid_by_email={"alice@example.com": "alice-huid"},
     )
+    logger = StubLogger()
     service = TargetChatProvisioningService(
         telegram_gateway=telegram_gateway,
         express_gateway=express_gateway,
@@ -790,6 +799,7 @@ async def test_channel_chat_falls_back_to_invite_links_when_direct_add_is_fatal(
             max_delay_seconds=0,
             jitter_seconds=0,
         ),
+        logger=logger,
     )
 
     mapping = await service.ensure_target_chat(
@@ -811,6 +821,21 @@ async def test_channel_chat_falls_back_to_invite_links_when_direct_add_is_fatal(
     assert created_chat.participant_huids == ["initiator-huid"]
     assert len(personal_messages) == 1
     assert "https://express.example/chat/" in personal_messages[0].body
+    assert logger.records == [
+        (
+            "channel_members_sync_degraded",
+            {
+                "migration_id": "migration-bot",
+                "source_chat_id": "-100654",
+                "target_chat_id": mapping.target_chat_id,
+                "route_cts_host": None,
+                "participant_huids": ["alice-huid"],
+                "reason": "direct_add_failed",
+                "error_type": "FatalItemError",
+                "error": "direct add is not allowed for channel delivery",
+            },
+        ),
+    ]
 
 
 @pytest.mark.asyncio

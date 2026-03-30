@@ -594,6 +594,7 @@ class BotUiContainer(containers.DeclarativeContainer):
         identity_directory=identity_directory,
         audit_repository=audit_repository,
         retry_policy=retry_policy,
+        logger=logger,
     )
     inventory_use_case = providers.Factory(
         InventoryUseCase,

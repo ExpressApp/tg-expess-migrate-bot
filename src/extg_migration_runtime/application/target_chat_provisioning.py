@@ -79,6 +79,7 @@ class TargetChatProvisioningService:
         audit_repository: AuditRepository,
         retry_policy: AsyncRetryPolicy,
         express_bot_huid_binding_repository: ExpressBotHuidBindingRepository | None = None,
+        logger: object | None = None,
     ) -> None:
         self._telegram_gateway = telegram_gateway
         self._express_gateway = express_gateway
@@ -87,6 +88,7 @@ class TargetChatProvisioningService:
         self._identity_directory = identity_directory
         self._audit_repository = audit_repository
         self._retry_policy = retry_policy
+        self._logger = logger
 
     async def get_existing_target_chat(
         self,
@@ -1136,6 +1138,18 @@ class TargetChatProvisioningService:
                     )
             except FatalItemError as error:
                 fallback_targets.extend(grouped_targets)
+                self._log(
+                    "warning",
+                    self._members_sync_degraded_event_type(chat_kind),
+                    migration_id=migration_id,
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_chat_id,
+                    route_cts_host=route_cts_host,
+                    participant_huids=participant_huids,
+                    reason="direct_add_failed",
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
                 await self._audit_repository.add(
                     AuditEvent(
                         migration_id=migration_id,
@@ -1724,6 +1738,18 @@ class TargetChatProvisioningService:
 
     def _helper_bot_attach_degraded_event_type(self, chat_kind: str) -> str:
         return "channel_helper_bot_attach_degraded" if chat_kind == "channel" else "target_chat_helper_bot_attach_degraded"
+
+    def _log(
+        self,
+        level: str,
+        event: str,
+        **payload: object,
+    ) -> None:
+        if self._logger is None:
+            return
+        log_method = getattr(self._logger, level, None)
+        if callable(log_method):
+            log_method(event, **payload)
 
     def _helper_bot_attach_skipped_event_type(self, chat_kind: str) -> str:
         return "channel_helper_bot_attach_skipped" if chat_kind == "channel" else "target_chat_helper_bot_attach_skipped"
