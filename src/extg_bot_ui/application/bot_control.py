@@ -3492,6 +3492,11 @@ class MigrationBotControlService:
         self,
         record: ChatMigrationConfigRecord,
     ) -> ManifestDialog:
+        source_thread_id = record.source_thread_id
+        if record.topic_strategy == "split_by_topic" and record.source_topic_id:
+            # Older configs stored Telegram `top_message`, but forum history routing
+            # uses topic id. Prefer `source_topic_id` for split-by-topic manifests.
+            source_thread_id = record.source_topic_id
         return ManifestDialog(
             source_chat_id=record.source_chat_id,
             source_chat_type=record.source_chat_type,
@@ -3512,7 +3517,7 @@ class MigrationBotControlService:
             skip_in_all=record.skip_in_all,
             telegram_chat_id=record.telegram_chat_id,
             source_topic_id=record.source_topic_id,
-            source_thread_id=record.source_thread_id,
+            source_thread_id=source_thread_id,
             source_thread_title=record.source_thread_title,
         )
 
@@ -3939,9 +3944,9 @@ class MigrationBotControlService:
             for record in existing_records
         }
         for topic in topics:
-            if not topic.top_message_id:
+            if not topic.topic_id:
                 raise ConfigurationError(
-                    f"topic {topic.topic_id} in source_chat_id={dialog.dialog_id} has no top_message_id",
+                    f"topic in source_chat_id={dialog.dialog_id} has no topic_id",
                 )
             logical_source_chat_id = self._topic_source_chat_id(
                 dialog.dialog_id,
@@ -4036,7 +4041,7 @@ class MigrationBotControlService:
                 ),
                 telegram_chat_id=dialog.dialog_id,
                 source_topic_id=topic.topic_id,
-                source_thread_id=topic.top_message_id,
+                source_thread_id=topic.topic_id,
                 source_thread_title=topic.title,
             )
             saved_child = await self._chat_migration_config_repository.save(child_record)

@@ -3435,7 +3435,7 @@ async def test_start_migrate_chat_split_by_topic_materializes_logical_topic_dial
         for manifest in manifests
     ] == [["forum-1#topic:101"], ["forum-1#topic:102"]]
     assert {manifest.dialogs[0].telegram_chat_id for manifest in manifests} == {"forum-1"}
-    assert {manifest.dialogs[0].source_thread_id for manifest in manifests} == {"10", "20"}
+    assert {manifest.dialogs[0].source_thread_id for manifest in manifests} == {"101", "102"}
 
 
 @pytest.mark.asyncio

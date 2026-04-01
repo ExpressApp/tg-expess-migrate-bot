@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+import itertools
 import hashlib
 import os
 from dataclasses import replace
@@ -16,7 +17,7 @@ from telethon import TelegramClient, utils
 from telethon import events
 from telethon.errors import FloodWaitError, RPCError
 from telethon.sessions import StringSession
-from telethon.tl.functions.messages import GetForumTopicsRequest
+from telethon.tl.functions.messages import GetForumTopicsRequest, SearchRequest
 from telethon.tl.custom.dialog import Dialog
 from telethon.tl.custom.message import Message
 from telethon.tl.types import Channel, Chat, User
@@ -44,14 +45,18 @@ from extg_shared.contracts.models import (
 )
 from telethon.tl.types import (
     InputMessageEntityMentionName,
+    InputMessagesFilterEmpty,
     MessageEntityMention,
     MessageEntityMentionName,
     MessageEntityTextUrl,
+    MessageEmpty,
 )
 
 
 class TelethonTelegramGateway:
     """Real Telegram adapter based on Telethon."""
+
+    _SEARCH_CHUNK_SIZE = 100
 
     def __init__(
         self,
@@ -335,9 +340,10 @@ class TelethonTelegramGateway:
                         SourceTopic(
                             topic_id=topic_id,
                             title=str(getattr(topic, "title", None) or f"topic_{topic_id}"),
-                            top_message_id=self._optional_str(
-                                getattr(topic, "top_message", None),
-                            ),
+                            # For forum topics, Telegram routes thread history by topic id.
+                            # `top_message` points to the latest message in the topic and is
+                            # not suitable as a stable thread key for history fetches.
+                            top_message_id=topic_id,
                         ),
                     )
                 if not batch or len(batch) < 100:
@@ -493,7 +499,7 @@ class TelethonTelegramGateway:
                 source_message_id = str(message.id)
                 source_thread_id = (
                     manifest_dialog.source_thread_id
-                    or self._optional_str(getattr(message, "reply_to_top_id", None))
+                    or self._message_thread_id(message)
                 )
                 if not manifest_dialog.matches_source_message(
                     source_message_id=source_message_id,
@@ -549,25 +555,15 @@ class TelethonTelegramGateway:
         raw_messages: list[Message] = []
         target_count = max(1, limit) + 1
 
-        if min_id < thread_root_id:
-            root_message = await self._get_message_by_id(entity=entity, message_id=thread_root_id)
-            if root_message is not None:
-                raw_messages.append(root_message)
-
-        remaining_limit = target_count - len(raw_messages)
-        if remaining_limit <= 0:
-            return raw_messages
-
-        async for message in self._client.iter_messages(
-            entity,
-            limit=remaining_limit,
-            min_id=max(min_id, thread_root_id),
-            reverse=True,
-            reply_to=thread_root_id,
+        async for message in self._iter_topic_messages(
+            entity=entity,
+            thread_root_id=thread_root_id,
+            min_id=min_id,
+            limit=target_count,
         ):
-            if not getattr(message, "id", None):
-                continue
             raw_messages.append(message)
+            if len(raw_messages) >= target_count:
+                break
         return raw_messages
 
     async def _iter_inventory_messages(
@@ -582,21 +578,126 @@ class TelethonTelegramGateway:
             return
 
         thread_root_id = self._parse_thread_id(manifest_dialog.source_thread_id)
-        root_message = await self._get_message_by_id(entity=entity, message_id=thread_root_id)
-        if root_message is not None:
-            yield root_message
-        async for message in self._client.iter_messages(
-            entity,
-            reverse=True,
-            reply_to=thread_root_id,
+        async for message in self._iter_topic_messages(
+            entity=entity,
+            thread_root_id=thread_root_id,
+            min_id=0,
+            limit=None,
         ):
             yield message
+
+    async def _iter_topic_messages(
+        self,
+        *,
+        entity: Any,
+        thread_root_id: int,
+        min_id: int,
+        limit: int | None,
+    ) -> AsyncIterator[Message]:
+        yielded = 0
+        seen_ids: set[int] = set()
+        if min_id < thread_root_id:
+            root_message = await self._get_message_by_id(
+                entity=entity,
+                message_id=thread_root_id,
+            )
+            if root_message is not None and getattr(root_message, "id", None):
+                seen_ids.add(root_message.id)
+                yield root_message
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    return
+
+        offset_id = max(min_id, thread_root_id) + 1
+        while True:
+            remaining = None if limit is None else limit - yielded
+            if remaining is not None and remaining <= 0:
+                return
+            request_limit = (
+                self._SEARCH_CHUNK_SIZE
+                if remaining is None
+                else min(remaining, self._SEARCH_CHUNK_SIZE)
+            )
+            request = SearchRequest(
+                peer=entity,
+                q="",
+                filter=InputMessagesFilterEmpty(),
+                min_date=None,
+                max_date=None,
+                offset_id=offset_id,
+                add_offset=-request_limit,
+                limit=request_limit,
+                max_id=0,
+                min_id=0,
+                hash=0,
+                top_msg_id=thread_root_id,
+            )
+            response = await self._client(request)
+            messages = list(getattr(response, "messages", []))
+            if not messages:
+                return
+
+            entities = {
+                utils.get_peer_id(item): item
+                for item in itertools.chain(
+                    getattr(response, "users", []),
+                    getattr(response, "chats", []),
+                )
+            }
+            last_emitted_id: int | None = None
+            for message in reversed(messages):
+                if isinstance(message, MessageEmpty):
+                    continue
+                message_id = getattr(message, "id", None)
+                if not isinstance(message_id, int):
+                    continue
+                if message_id <= min_id or message_id in seen_ids:
+                    continue
+                self._finish_message_init(
+                    message=message,
+                    entities=entities,
+                    entity=entity,
+                )
+                seen_ids.add(message_id)
+                last_emitted_id = message_id
+                yield message
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    return
+            if last_emitted_id is None:
+                return
+            offset_id = last_emitted_id + 1
 
     async def _get_message_by_id(self, *, entity: Any, message_id: int) -> Message | None:
         message = await self._client.get_messages(entity, ids=message_id)
         if isinstance(message, list):
             return message[0] if message else None
         return message if getattr(message, "id", None) else None
+
+    def _finish_message_init(
+        self,
+        *,
+        message: Message,
+        entities: dict[int, Any],
+        entity: Any,
+    ) -> None:
+        finish_init = getattr(message, "_finish_init", None)
+        if callable(finish_init):
+            finish_init(self._client, entities, entity)
+
+    def _message_thread_id(self, message: Message) -> str | None:
+        direct_thread_id = self._optional_str(getattr(message, "reply_to_top_id", None))
+        if direct_thread_id is not None:
+            return direct_thread_id
+        reply_header = getattr(message, "reply_to", None)
+        if reply_header is None:
+            return None
+        top_id = self._optional_str(getattr(reply_header, "reply_to_top_id", None))
+        if top_id is not None:
+            return top_id
+        if bool(getattr(reply_header, "forum_topic", False)):
+            return self._optional_str(getattr(reply_header, "reply_to_msg_id", None))
+        return None
 
     def _parse_thread_id(self, thread_id: str) -> int:
         try:
@@ -781,7 +882,7 @@ class TelethonTelegramGateway:
             body=getattr(message, "message", None),
             chat_title=self._dialog_title(entity),
             thread_id=(
-                self._optional_str(getattr(message, "reply_to_top_id", None))
+                self._message_thread_id(message)
                 or thread_id_override
             ),
             reply_to_message_id=self._optional_str(reply_to_message_id),

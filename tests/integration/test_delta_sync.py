@@ -94,7 +94,7 @@ def build_split_topic_manifest() -> MigrationManifest:
                     "topic_strategy": "split_by_topic",
                     "telegram_chat_id": "chat-1",
                     "source_topic_id": "101",
-                    "source_thread_id": "10",
+                    "source_thread_id": "101",
                     "source_thread_title": "Topic 1",
                 },
                 {
@@ -105,7 +105,7 @@ def build_split_topic_manifest() -> MigrationManifest:
                     "topic_strategy": "split_by_topic",
                     "telegram_chat_id": "chat-1",
                     "source_topic_id": "102",
-                    "source_thread_id": "20",
+                    "source_thread_id": "102",
                     "source_thread_title": "Topic 2",
                 },
             ],
@@ -605,10 +605,10 @@ async def test_delta_sync_split_by_topic_fans_out_one_physical_subscription_to_m
         messages_by_dialog={"chat-1": []},
         delta_events_by_dialog={
             "chat-1": [
-                build_delta_event("10", 0),
-                build_delta_event("11", 1, thread_id="10"),
-                build_delta_event("20", 2),
-                build_delta_event("21", 3, thread_id="20"),
+                build_delta_event("10", 0, thread_id="101"),
+                build_delta_event("11", 1, thread_id="101"),
+                build_delta_event("20", 2, thread_id="102"),
+                build_delta_event("21", 3, thread_id="102"),
             ],
         },
     )

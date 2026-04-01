@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telethon.tl.functions.messages import SearchRequest
 
 from extg_shared.contracts.manifest import MigrationManifest
 from extg_shared.contracts.models import CanonicalAttachment, SourceDialog
@@ -213,6 +214,21 @@ class StubHistoryClient(StubTelethonClient):
         self._messages = messages
         self._replies_by_thread_id = replies_by_thread_id or {}
 
+    async def __call__(self, request):
+        assert isinstance(request, SearchRequest)
+        messages = self._replies_by_thread_id.get(request.top_msg_id or 0, [])
+        filtered = [
+            message
+            for message in messages
+            if int(getattr(message, "id", 0) or 0) >= int(request.offset_id or 0)
+        ]
+        return SimpleNamespace(
+            messages=filtered[: request.limit],
+            users=[],
+            chats=[],
+            count=len(filtered),
+        )
+
     def iter_messages(
         self,
         entity,
@@ -253,6 +269,25 @@ class StubInventoryClient(StubTelethonClient):
         super().__init__(dialogs)
         self._messages_by_entity_id = messages_by_entity_id
         self._replies_by_entity_and_thread_id = replies_by_entity_and_thread_id or {}
+
+    async def __call__(self, request):
+        assert isinstance(request, SearchRequest)
+        entity_id = str(getattr(request.peer, "id", ""))
+        messages = self._replies_by_entity_and_thread_id.get(
+            (entity_id, request.top_msg_id or 0),
+            [],
+        )
+        filtered = [
+            message
+            for message in messages
+            if int(getattr(message, "id", 0) or 0) >= int(request.offset_id or 0)
+        ]
+        return SimpleNamespace(
+            messages=filtered[: request.limit],
+            users=[],
+            chats=[],
+            count=len(filtered),
+        )
 
     def iter_messages(
         self,
@@ -442,7 +477,7 @@ async def test_telethon_gateway_fetch_history_reads_topic_thread_history() -> No
         date=datetime(2026, 3, 25, 12, 1, tzinfo=UTC),
         message="Topic reply",
         reply_to_msg_id=10,
-        reply_to=SimpleNamespace(reply_to_msg_id=10),
+        reply_to=SimpleNamespace(reply_to_msg_id=10, reply_to_top_id=10),
         reply_to_top_id=None,
         edit_date=None,
         sticker=None,
@@ -481,6 +516,49 @@ async def test_telethon_gateway_fetch_history_reads_topic_thread_history() -> No
 
     assert [message.message_id for message in batch.messages] == ["10", "11"]
     assert [message.thread_id for message in batch.messages] == ["10", "10"]
+
+
+@pytest.mark.asyncio
+async def test_telethon_gateway_extracts_forum_thread_id_from_reply_header() -> None:
+    dialog = _telethon_dialog(101, "Forum Chat")
+    message = SimpleNamespace(
+        id=11,
+        date=datetime(2026, 3, 25, 12, 1, tzinfo=UTC),
+        message="Topic reply",
+        reply_to_msg_id=10,
+        reply_to=SimpleNamespace(
+            reply_to_msg_id=10,
+            reply_to_top_id=None,
+            forum_topic=True,
+        ),
+        reply_to_top_id=None,
+        edit_date=None,
+        sticker=None,
+        photo=None,
+        voice=None,
+        video=None,
+        audio=None,
+        document=None,
+        poll=None,
+        action=None,
+        file=None,
+        entities=[],
+        sender=None,
+        sender_id=42,
+        post_author=None,
+        to_dict=lambda: {"_": "Message"},
+    )
+    client = StubHistoryClient([dialog], [message])
+    gateway = TelethonTelegramGateway(
+        api_id=None,
+        api_hash=None,
+        session_string=None,
+        client=client,
+    )
+
+    batch = await gateway.fetch_history("101", cursor=None, limit=10)
+
+    assert [item.thread_id for item in batch.messages] == ["10"]
 
 
 @pytest.mark.asyncio
@@ -593,18 +671,21 @@ async def test_telethon_gateway_list_dialogs_estimates_topic_inventory_from_thre
     starter = SimpleNamespace(
         id=10,
         message="Topic starter",
+        reply_to=None,
         reply_to_top_id=None,
         file=None,
     )
     reply = SimpleNamespace(
         id=11,
         message="Topic reply",
+        reply_to=SimpleNamespace(reply_to_msg_id=10, reply_to_top_id=10),
         reply_to_top_id=None,
         file=SimpleNamespace(size=7),
     )
     general = SimpleNamespace(
         id=99,
         message="General message",
+        reply_to=None,
         reply_to_top_id=None,
         file=None,
     )

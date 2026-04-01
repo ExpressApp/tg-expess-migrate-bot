@@ -122,7 +122,7 @@ def build_split_topic_manifest() -> MigrationManifest:
                     "topic_strategy": "split_by_topic",
                     "telegram_chat_id": "chat-1",
                     "source_topic_id": "101",
-                    "source_thread_id": "10",
+                    "source_thread_id": "101",
                     "source_thread_title": "Topic 1",
                 },
                 {
@@ -133,7 +133,7 @@ def build_split_topic_manifest() -> MigrationManifest:
                     "topic_strategy": "split_by_topic",
                     "telegram_chat_id": "chat-1",
                     "source_topic_id": "102",
-                    "source_thread_id": "20",
+                    "source_thread_id": "102",
                     "source_thread_title": "Topic 2",
                 },
             ],
@@ -1245,10 +1245,10 @@ async def test_backfill_split_by_topic_routes_messages_to_separate_target_chats(
     manifest = build_split_topic_manifest()
     dialog = SourceDialog(dialog_id="chat-1", chat_type="supergroup", title="Forum Chat")
     messages = [
-        build_message("10", 0, body="Topic 1 starter"),
-        build_message("11", 1, body="Topic 1 reply", thread_id="10"),
-        build_message("20", 2, body="Topic 2 starter"),
-        build_message("21", 3, body="Topic 2 reply", thread_id="20"),
+        build_message("10", 0, body="Topic 1 starter", thread_id="101"),
+        build_message("11", 1, body="Topic 1 reply", thread_id="101"),
+        build_message("20", 2, body="Topic 2 starter", thread_id="102"),
+        build_message("21", 3, body="Topic 2 reply", thread_id="102"),
         build_message("30", 4, body="General message"),
     ]
     repositories = (
