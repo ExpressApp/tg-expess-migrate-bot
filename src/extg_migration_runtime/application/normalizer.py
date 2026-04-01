@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 
 from extg_migration_runtime.application.identity import UsernameEmailIdentityDirectory
@@ -123,4 +124,44 @@ class TelegramMessageNormalizer:
             return message.body
         if message.content_type is ContentType.SERVICE and message.service_payload:
             return "[service event]"
+        if message.content_type is ContentType.UNSUPPORTED:
+            unsupported_kind = self._unsupported_content_kind(message.raw_payload)
+            if unsupported_kind:
+                return f"[unsupported: {unsupported_kind}]"
         return f"[{message.content_type.value}]"
+
+    def _unsupported_content_kind(self, raw_payload: dict[str, object]) -> str | None:
+        candidates: list[str] = []
+        for nested_key in ("media", "action"):
+            nested = raw_payload.get(nested_key)
+            if isinstance(nested, dict):
+                nested_type = nested.get("_")
+                if isinstance(nested_type, str) and nested_type:
+                    candidates.append(nested_type)
+        for key in ("media_type", "type", "_"):
+            value = raw_payload.get(key)
+            if isinstance(value, str) and value:
+                candidates.append(value)
+        for candidate in candidates:
+            normalized = self._normalize_telegram_type_name(candidate)
+            if normalized and normalized not in {"message", "service"}:
+                return normalized
+        return None
+
+    def _normalize_telegram_type_name(self, raw_type_name: str) -> str | None:
+        normalized = raw_type_name.strip()
+        if not normalized:
+            return None
+        normalized = re.sub(
+            r"^(?:message(?:media|action)?|inputmedia|decryptedmessageaction)",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        normalized = normalized.strip("_ ")
+        if not normalized:
+            return None
+        normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
+        normalized = normalized.replace("-", "_").replace(" ", "_").lower()
+        normalized = re.sub(r"_+", "_", normalized).strip("_")
+        return normalized or None

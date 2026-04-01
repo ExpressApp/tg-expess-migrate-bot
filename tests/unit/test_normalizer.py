@@ -4,6 +4,7 @@ import pytest
 
 from extg_migration_runtime.application.identity import UsernameEmailIdentityDirectory
 from extg_migration_runtime.application.normalizer import (
+    DisplayOnlyIdentityResolver,
     DirectoryBackedIdentityResolver,
     TelegramMessageNormalizer,
 )
@@ -70,3 +71,55 @@ async def test_normalizer_preserves_body_offsets_for_mentions():
     assert normalized.body_plain == "  Привет, @alice"
     assert normalized.entities[0].target_huid == "22222222-2222-2222-2222-222222222222"
     assert normalized.entities[0].offset == 10
+
+
+@pytest.mark.asyncio
+async def test_normalizer_marks_unsupported_media_with_specific_kind():
+    normalizer = TelegramMessageNormalizer(DisplayOnlyIdentityResolver())
+
+    message = TelegramSourceMessage(
+        chat_id="chat-1",
+        message_id="2",
+        sent_at_utc=datetime(2026, 3, 19, 10, 5, tzinfo=UTC),
+        author=TelegramAuthor(
+            external_id="100",
+            display_name="Peer User",
+            username="peer.user",
+        ),
+        body=None,
+        content_type=ContentType.UNSUPPORTED,
+        raw_payload={
+            "_": "Message",
+            "media": {"_": "MessageMediaContact"},
+        },
+    )
+
+    normalized = await normalizer.normalize(message)
+
+    assert normalized.body_plain == "[unsupported: contact]"
+
+
+@pytest.mark.asyncio
+async def test_normalizer_marks_unsupported_archive_media_with_specific_kind():
+    normalizer = TelegramMessageNormalizer(DisplayOnlyIdentityResolver())
+
+    message = TelegramSourceMessage(
+        chat_id="chat-1",
+        message_id="3",
+        sent_at_utc=datetime(2026, 3, 19, 10, 10, tzinfo=UTC),
+        author=TelegramAuthor(
+            external_id="100",
+            display_name="Peer User",
+            username="peer.user",
+        ),
+        body=None,
+        content_type=ContentType.UNSUPPORTED,
+        raw_payload={
+            "type": "message",
+            "media_type": "video message",
+        },
+    )
+
+    normalized = await normalizer.normalize(message)
+
+    assert normalized.body_plain == "[unsupported: video_message]"

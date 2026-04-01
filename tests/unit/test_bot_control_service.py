@@ -716,6 +716,24 @@ async def drain_queued_jobs(service: MigrationBotControlService) -> None:
         )
 
 
+def test_job_key_stays_compact_for_multi_topic_batches():
+    service, _ = build_service()
+    source_chat_ids = tuple(
+        f"-1001421126432#topic:{topic_id}"
+        for topic_id in (35892, 35887, 1, 35889, 74467, 37059, 35914, 35890, 37019)
+    )
+
+    job_key = service._job_key(
+        operation="migrate_chat",
+        migration_id="tg_to_express_bot_managed",
+        source_chat_ids=source_chat_ids,
+    )
+
+    assert len(job_key) < 255
+    assert source_chat_ids[0] in job_key
+    assert ",-1001421126432#topic:35887" not in job_key
+
+
 @pytest.mark.asyncio
 async def test_start_migrate_chat_blocks_when_progress_policy_ask():
     checkpoint = MigrationCheckpoint(

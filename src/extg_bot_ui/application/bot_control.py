@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -3828,7 +3829,17 @@ class MigrationBotControlService:
         migration_id: str,
         source_chat_ids: tuple[str, ...],
     ) -> str:
-        suffix = ",".join(source_chat_ids) if source_chat_ids else "all"
+        if not source_chat_ids:
+            suffix = "all"
+        elif len(source_chat_ids) == 1:
+            suffix = source_chat_ids[0]
+        else:
+            joined_source_chat_ids = ",".join(source_chat_ids)
+            digest = hashlib.sha1(
+                joined_source_chat_ids.encode("utf-8"),
+                usedforsecurity=False,
+            ).hexdigest()[:12]
+            suffix = f"{source_chat_ids[0]}+{len(source_chat_ids) - 1}:{digest}"
         return f"{operation}:{migration_id}:{suffix}:{uuid4().hex[:12]}"
 
     def _format_datetime(self, value: datetime | None) -> str | None:

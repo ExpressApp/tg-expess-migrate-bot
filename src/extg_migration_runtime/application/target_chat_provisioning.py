@@ -1755,8 +1755,21 @@ class TargetChatProvisioningService:
         helper_bot_huid: str,
     ) -> None:
         async def _assert_route_admin_visible() -> None:
-            with self._use_cts_host(route_cts_host):
-                admin_huids = await self._express_gateway.list_chat_admin_huids(target_chat_id)
+            try:
+                with self._use_cts_host(route_cts_host):
+                    admin_huids = await self._express_gateway.list_chat_admin_huids(
+                        target_chat_id,
+                    )
+            except FatalItemError as error:
+                if self._is_route_admin_visibility_pending_error(error):
+                    raise RecoverableItemError(
+                        "helper bot route admin visibility is not ready yet: "
+                        f"route_cts_host={route_cts_host} "
+                        f"target_chat_id={target_chat_id} "
+                        f"helper_bot_huid={helper_bot_huid} "
+                        f"error={error}",
+                    ) from error
+                raise
             if helper_bot_huid not in admin_huids:
                 raise RecoverableItemError(
                     "helper bot route admin visibility is not ready yet: "
@@ -1767,6 +1780,20 @@ class TargetChatProvisioningService:
                 )
 
         await self._retry_policy.run(_assert_route_admin_visible)
+
+    def _is_route_admin_visibility_pending_error(self, error: BaseException) -> bool:
+        normalized_message = str(error).strip().lower()
+        return any(
+            marker in normalized_message
+            for marker in (
+                "chat_not_found",
+                "chat with specified id not found",
+                "no_permission_for_operation",
+                "permission denied",
+                "sender is not chat admin",
+                "not chat admin",
+            )
+        )
 
     async def _emit_access_link(
         self,
