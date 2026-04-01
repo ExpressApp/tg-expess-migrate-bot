@@ -101,6 +101,7 @@ class ExpressGatewayRouter:
         chat_type: str = "GROUP_CHAT",
         default_participant_huids: list[str] | None = None,
         request_timeout_seconds: float = 20.0,
+        attachment_request_timeout_seconds: float | None = 300.0,
         local_idempotency_cache_enabled: bool = True,
         gateway_factory: Callable[[ExpressBotAccountSettings], _ExpressGatewayLike] | None = None,
     ) -> None:
@@ -114,6 +115,7 @@ class ExpressGatewayRouter:
                 chat_type=chat_type,
                 default_participant_huids=default_participant_huids,
                 request_timeout_seconds=request_timeout_seconds,
+                attachment_request_timeout_seconds=attachment_request_timeout_seconds,
                 local_idempotency_cache_enabled=local_idempotency_cache_enabled,
             )
         for account in account_registry.accounts:
@@ -267,6 +269,7 @@ class ExpressFileStoreRouter:
         *,
         account_registry: ExpressBotAccountRegistry,
         request_timeout_seconds: float = 20.0,
+        attachment_request_timeout_seconds: float | None = 300.0,
         max_upload_size_bytes: int = 100 * 1024 * 1024,
         spool_max_memory_bytes: int = 1024 * 1024,
         file_store_factory: Callable[[ExpressBotAccountSettings], _ExpressFileStoreLike] | None = None,
@@ -279,6 +282,7 @@ class ExpressFileStoreRouter:
                 cts_url=account.cts_url,
                 secret_key=account.secret_key,
                 request_timeout_seconds=request_timeout_seconds,
+                attachment_request_timeout_seconds=attachment_request_timeout_seconds,
                 max_upload_size_bytes=max_upload_size_bytes,
                 spool_max_memory_bytes=spool_max_memory_bytes,
             )

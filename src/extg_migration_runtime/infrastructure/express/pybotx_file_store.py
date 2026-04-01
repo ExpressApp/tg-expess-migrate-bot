@@ -29,6 +29,7 @@ class PybotxExpressFileStore:
         cts_url: str | None,
         secret_key: str | None,
         request_timeout_seconds: float = 20.0,
+        attachment_request_timeout_seconds: float | None = 300.0,
         max_upload_size_bytes: int = 100 * 1024 * 1024,
         spool_max_memory_bytes: int = 1024 * 1024,
         bot: Bot | None = None,
@@ -43,7 +44,10 @@ class PybotxExpressFileStore:
             if not secret_key:
                 raise ConfigurationError("express.secret_key is required for pybotx file store")
             self._httpx_client = httpx_client or httpx.AsyncClient(
-                timeout=httpx.Timeout(request_timeout_seconds),
+                timeout=self._build_httpx_timeout(
+                    request_timeout_seconds=request_timeout_seconds,
+                    attachment_request_timeout_seconds=attachment_request_timeout_seconds,
+                ),
             )
             self._bot = Bot(
                 collectors=[],
@@ -59,6 +63,24 @@ class PybotxExpressFileStore:
         else:
             self._bot = bot
             self._httpx_client = httpx_client
+
+    @staticmethod
+    def _build_httpx_timeout(
+        *,
+        request_timeout_seconds: float,
+        attachment_request_timeout_seconds: float | None,
+    ) -> httpx.Timeout:
+        attachment_timeout = (
+            attachment_request_timeout_seconds
+            if attachment_request_timeout_seconds is not None
+            else request_timeout_seconds
+        )
+        return httpx.Timeout(
+            connect=request_timeout_seconds,
+            read=request_timeout_seconds,
+            write=attachment_timeout,
+            pool=request_timeout_seconds,
+        )
 
     async def upload_file(
         self,

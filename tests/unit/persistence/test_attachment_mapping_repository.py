@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import BigInteger
 
 from extg_shared.contracts.models import (
     AttachmentImportStatus,
@@ -544,3 +545,8 @@ async def test_postgres_attachment_repo_terminal_states_and_summary():
             count=1,
         ),
     ]
+
+
+def test_attachment_persistence_models_use_bigint_for_size_bytes():
+    assert isinstance(MigrationAttachmentMapModel.__table__.c.size_bytes.type, BigInteger)
+    assert isinstance(AttachmentStageModel.__table__.c.size_bytes.type, BigInteger)

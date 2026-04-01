@@ -45,6 +45,19 @@ class TelethonIntegrationService:
                 source_backend=source_backend,
             )
 
+    async def get_source_dialog(
+        self,
+        *,
+        operator_huid: str,
+        dialog_id: str,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        async with self._bind_operator(operator_huid, mark_used=True):
+            return await self._telegram_gateway.get_source_dialog(
+                dialog_id,
+                source_backend=source_backend,
+            )
+
     async def list_dialogs(
         self,
         *,

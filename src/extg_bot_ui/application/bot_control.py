@@ -3420,13 +3420,12 @@ class MigrationBotControlService:
             raise ConfigurationError(
                 f"source_chat_id={source_chat_id!r} was not found in staged Telegram export archives",
             )
-        discovered = await self._telegram_gateway.list_available_dialogs(
-            limit=1000,
+        dialog = await self._telegram_gateway.get_source_dialog(
+            source_chat_id,
             source_backend=source_backend,
         )
-        for dialog in discovered:
-            if dialog.dialog_id == source_chat_id:
-                return dialog
+        if dialog is not None:
+            return dialog
         raise ConfigurationError(f"source_chat_id={source_chat_id!r} was not found in Telegram dialogs")
 
     async def _configured_chat_ids(

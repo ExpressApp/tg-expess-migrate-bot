@@ -13,12 +13,14 @@ from extg_shared.contracts.api.telethon_service import (
     ChannelAccessProfileRequest,
     DownloadAttachmentRequest,
     FetchHistoryRequest,
+    GetSourceDialogRequest,
     HISTORY_BATCH_ADAPTER,
     HISTORY_CURSOR_ADAPTER,
     ListAvailableDialogsRequest,
     ListDialogsRequest,
     ListParticipantsRequest,
     ListTopicsRequest,
+    SOURCE_DIALOG_ADAPTER,
     SOURCE_CHANNEL_ACCESS_PROFILE_ADAPTER,
     SOURCE_DIALOG_LIST_ADAPTER,
     SOURCE_PARTICIPANT_LIST_ADAPTER,
@@ -196,6 +198,25 @@ class RemoteTelethonServiceClient:
             ).model_dump(mode="json"),
         )
         return SOURCE_DIALOG_LIST_ADAPTER.validate_python(payload)
+
+    async def get_source_dialog(
+        self,
+        *,
+        operator_huid: str,
+        dialog_id: str,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        payload = await self._post_json(
+            "/internal/telegram/dialogs/get",
+            GetSourceDialogRequest(
+                operator_huid=operator_huid,
+                dialog_id=dialog_id,
+                source_backend=source_backend,
+            ).model_dump(mode="json"),
+        )
+        if payload is None:
+            return None
+        return SOURCE_DIALOG_ADAPTER.validate_python(payload)
 
     async def list_dialogs(
         self,
@@ -527,6 +548,18 @@ class RemoteTelegramGateway:
             operator_huid=self._require_operator_huid(),
             limit=limit,
             query=query,
+            source_backend=source_backend,
+        )
+
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        return await self._client.get_source_dialog(
+            operator_huid=self._require_operator_huid(),
+            dialog_id=dialog_id,
             source_backend=source_backend,
         )
 

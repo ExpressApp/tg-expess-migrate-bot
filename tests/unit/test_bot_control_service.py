@@ -130,6 +130,17 @@ class StubTelegramGateway:
     ):
         return self._dialogs[:limit]
 
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telethon_user_session",
+    ):
+        for dialog in self._dialogs:
+            if dialog.dialog_id == dialog_id:
+                return dialog
+        return None
+
     async def list_participants(
         self,
         dialog_id: str,
@@ -833,6 +844,44 @@ async def test_list_available_chats_uses_operator_telegram_session_context(tmp_p
     )
 
     assert observed_session_paths == ["session-string-1"]
+
+
+@pytest.mark.asyncio
+async def test_start_migrate_chat_uses_direct_dialog_lookup_instead_of_listing_all_dialogs():
+    class DirectLookupTelegramGateway(StubTelegramGateway):
+        async def list_available_dialogs(
+            self,
+            *,
+            limit: int = 100,
+            query: str | None = None,
+            source_backend: str = "telethon_user_session",
+        ):
+            raise AssertionError("list_available_dialogs should not be used for direct /migrate lookup")
+
+    telegram_gateway = DirectLookupTelegramGateway(
+        dialogs=[
+            SourceDialog(
+                dialog_id="-1001232768830",
+                chat_type="supergroup",
+                title="Forum Chat",
+                has_topics=False,
+            ),
+        ],
+    )
+    service, _ = build_service(
+        telegram_gateway=telegram_gateway,
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+    )
+
+    result = await service.start_migrate_chat(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        source_chat_id="-1001232768830",
+        options=MigrationRunOptions(progress_policy="resume"),
+    )
+
+    assert result.status == "accepted"
 
 
 @pytest.mark.asyncio

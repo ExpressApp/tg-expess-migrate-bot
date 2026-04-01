@@ -158,6 +158,7 @@ class ExpressSettings(BaseModel):
     chat_type: str = "GROUP_CHAT"
     default_participant_huids: Annotated[list[str], NoDecode] = Field(default_factory=list)
     request_timeout_seconds: float = 20.0
+    attachment_request_timeout_seconds: float | None = 300.0
     local_idempotency_cache_enabled: bool = True
 
     @field_validator("accounts", mode="before")

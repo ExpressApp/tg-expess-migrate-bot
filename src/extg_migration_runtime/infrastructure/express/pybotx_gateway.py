@@ -74,6 +74,7 @@ class PybotxExpressGateway:
         chat_type: str = "GROUP_CHAT",
         default_participant_huids: list[str] | None = None,
         request_timeout_seconds: float = 20.0,
+        attachment_request_timeout_seconds: float | None = 300.0,
         local_idempotency_cache_enabled: bool = True,
         bot: Bot | None = None,
         httpx_client: httpx.AsyncClient | None = None,
@@ -88,7 +89,10 @@ class PybotxExpressGateway:
             if not secret_key:
                 raise ConfigurationError("express.secret_key is required for pybotx")
             self._httpx_client = httpx_client or httpx.AsyncClient(
-                timeout=httpx.Timeout(request_timeout_seconds),
+                timeout=self._build_httpx_timeout(
+                    request_timeout_seconds=request_timeout_seconds,
+                    attachment_request_timeout_seconds=attachment_request_timeout_seconds,
+                ),
             )
             self._bot = Bot(
                 collectors=[],
@@ -129,6 +133,24 @@ class PybotxExpressGateway:
         self._local_idempotency_cache_enabled = local_idempotency_cache_enabled
         self._idempotency_cache: dict[str, SentMessageRef] = {}
         self._idempotency_lock = asyncio.Lock()
+
+    @staticmethod
+    def _build_httpx_timeout(
+        *,
+        request_timeout_seconds: float,
+        attachment_request_timeout_seconds: float | None,
+    ) -> httpx.Timeout:
+        attachment_timeout = (
+            attachment_request_timeout_seconds
+            if attachment_request_timeout_seconds is not None
+            else request_timeout_seconds
+        )
+        return httpx.Timeout(
+            connect=request_timeout_seconds,
+            read=request_timeout_seconds,
+            write=attachment_timeout,
+            pool=request_timeout_seconds,
+        )
 
     async def create_chat(
         self,

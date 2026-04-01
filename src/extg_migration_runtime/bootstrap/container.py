@@ -329,6 +329,10 @@ class MigrationRuntimeContainer(containers.DeclarativeContainer):
             lambda app_settings: app_settings.express.request_timeout_seconds,
             settings,
         ),
+        attachment_request_timeout_seconds=providers.Callable(
+            lambda app_settings: app_settings.express.attachment_request_timeout_seconds,
+            settings,
+        ),
         local_idempotency_cache_enabled=providers.Callable(
             lambda app_settings: app_settings.express.local_idempotency_cache_enabled,
             settings,
@@ -339,6 +343,10 @@ class MigrationRuntimeContainer(containers.DeclarativeContainer):
         account_registry=express_account_registry,
         request_timeout_seconds=providers.Callable(
             lambda app_settings: app_settings.express.request_timeout_seconds,
+            settings,
+        ),
+        attachment_request_timeout_seconds=providers.Callable(
+            lambda app_settings: app_settings.express.attachment_request_timeout_seconds,
             settings,
         ),
         max_upload_size_bytes=providers.Callable(

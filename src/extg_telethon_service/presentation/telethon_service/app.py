@@ -13,6 +13,7 @@ from extg_shared.contracts.api.telethon_service import (
     ChannelAccessProfileRequest,
     DownloadAttachmentRequest,
     FetchHistoryRequest,
+    GetSourceDialogRequest,
     HISTORY_BATCH_ADAPTER,
     HISTORY_CURSOR_ADAPTER,
     ListAvailableDialogsRequest,
@@ -21,6 +22,7 @@ from extg_shared.contracts.api.telethon_service import (
     ListTopicsRequest,
     MIGRATION_MANIFEST_ADAPTER,
     SOURCE_CHANNEL_ACCESS_PROFILE_ADAPTER,
+    SOURCE_DIALOG_ADAPTER,
     SOURCE_DIALOG_LIST_ADAPTER,
     SOURCE_PARTICIPANT_LIST_ADAPTER,
     SOURCE_TOPIC_LIST_ADAPTER,
@@ -164,6 +166,20 @@ def create_telethon_service_app(
                 source_backend=request.source_backend,
             )
             return SOURCE_DIALOG_LIST_ADAPTER.dump_python(result, mode="json")
+        except Exception as error:
+            _raise_http_error(error)
+
+    @app.post("/internal/telegram/dialogs/get")
+    async def get_source_dialog(request: GetSourceDialogRequest) -> dict[str, Any] | None:
+        try:
+            result = await facade.get_source_dialog(
+                operator_huid=request.operator_huid,
+                dialog_id=request.dialog_id,
+                source_backend=request.source_backend,
+            )
+            if result is None:
+                return None
+            return SOURCE_DIALOG_ADAPTER.dump_python(result, mode="json")
         except Exception as error:
             _raise_http_error(error)
 

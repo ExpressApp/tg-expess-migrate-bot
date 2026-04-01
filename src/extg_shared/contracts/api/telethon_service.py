@@ -57,6 +57,12 @@ class ListAvailableDialogsRequest(BaseModel):
     source_backend: str = "telethon_user_session"
 
 
+class GetSourceDialogRequest(BaseModel):
+    operator_huid: str
+    dialog_id: str
+    source_backend: str = "telethon_user_session"
+
+
 class ListDialogsRequest(BaseModel):
     operator_huid: str
     manifest: dict[str, Any]
@@ -100,6 +106,7 @@ TELEGRAM_PASSWORD_CHALLENGE_ADAPTER = TypeAdapter(TelegramPasswordChallengeResul
 TELEGRAM_SESSION_STATUS_ADAPTER = TypeAdapter(TelegramSessionStatusResult)
 TELEGRAM_DISCONNECT_ADAPTER = TypeAdapter(TelegramDisconnectResult)
 SOURCE_DIALOG_LIST_ADAPTER = TypeAdapter(list[SourceDialog])
+SOURCE_DIALOG_ADAPTER = TypeAdapter(SourceDialog)
 SOURCE_PARTICIPANT_LIST_ADAPTER = TypeAdapter(list[SourceParticipant])
 SOURCE_TOPIC_LIST_ADAPTER = TypeAdapter(list[SourceTopic])
 HISTORY_CURSOR_ADAPTER = TypeAdapter(HistoryCursor)
@@ -114,6 +121,7 @@ __all__ = [
     "ChannelAccessProfileRequest",
     "DownloadAttachmentRequest",
     "FetchHistoryRequest",
+    "GetSourceDialogRequest",
     "HISTORY_BATCH_ADAPTER",
     "HISTORY_CURSOR_ADAPTER",
     "ListAvailableDialogsRequest",
@@ -122,6 +130,7 @@ __all__ = [
     "ListTopicsRequest",
     "MIGRATION_MANIFEST_ADAPTER",
     "SOURCE_CHANNEL_ACCESS_PROFILE_ADAPTER",
+    "SOURCE_DIALOG_ADAPTER",
     "SOURCE_DIALOG_LIST_ADAPTER",
     "SOURCE_PARTICIPANT_LIST_ADAPTER",
     "SOURCE_TOPIC_LIST_ADAPTER",

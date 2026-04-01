@@ -57,6 +57,18 @@ class SessionAwareTelegramGateway:
             source_backend=source_backend,
         )
 
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        gateway = await self._gateway()
+        return await gateway.get_source_dialog(
+            dialog_id,
+            source_backend=source_backend,
+        )
+
     async def list_dialogs(self, manifest: MigrationManifest) -> list[SourceDialog]:
         gateway = await self._gateway()
         return await gateway.list_dialogs(manifest)

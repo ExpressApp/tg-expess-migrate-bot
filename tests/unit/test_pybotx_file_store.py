@@ -118,3 +118,23 @@ async def test_upload_file_rejects_payload_over_size_limit():
         )
 
     assert bot.calls == []
+
+
+@pytest.mark.asyncio
+async def test_file_store_uses_extended_write_timeout_for_attachment_requests():
+    store = PybotxExpressFileStore(
+        bot_id="043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+        cts_url="https://cts11dev.ccsteam.ru/",
+        secret_key="secret",
+        request_timeout_seconds=20.0,
+        attachment_request_timeout_seconds=300.0,
+    )
+
+    try:
+        timeout = store._httpx_client.timeout
+        assert timeout.connect == 20.0
+        assert timeout.read == 20.0
+        assert timeout.write == 300.0
+        assert timeout.pool == 20.0
+    finally:
+        await store.close()

@@ -257,6 +257,26 @@ async def test_send_message_with_document_uses_attachment_document():
 
 
 @pytest.mark.asyncio
+async def test_gateway_uses_extended_write_timeout_for_attachment_requests():
+    gateway = PybotxExpressGateway(
+        bot_id="043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+        cts_url="https://cts11dev.ccsteam.ru/",
+        secret_key="secret",
+        request_timeout_seconds=20.0,
+        attachment_request_timeout_seconds=300.0,
+    )
+
+    try:
+        timeout = gateway._httpx_client.timeout
+        assert timeout.connect == 20.0
+        assert timeout.read == 20.0
+        assert timeout.write == 300.0
+        assert timeout.pool == 20.0
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_send_message_with_staged_file_falls_back_to_regular_file_payload():
     bot = StubBot()
     httpx_client = httpx.AsyncClient(

@@ -91,6 +91,14 @@ class FakeTelegramGateway:
                 break
         return dialogs
 
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        return self._dialogs.get(dialog_id)
+
     async def list_dialogs(self, manifest: MigrationManifest) -> list[SourceDialog]:
         results: list[SourceDialog] = []
         for manifest_dialog in manifest.dialogs:

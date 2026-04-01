@@ -61,6 +61,14 @@ class TelegramGateway(Protocol):
     ) -> list[SourceDialog]:
         """Discover available Telegram dialogs without requiring a manifest."""
 
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        """Resolve one Telegram dialog directly by id."""
+
     async def list_dialogs(self, manifest: MigrationManifest) -> list[SourceDialog]:
         """List dialogs included in the migration manifest."""
 

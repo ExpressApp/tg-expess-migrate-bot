@@ -127,6 +127,33 @@ class TelethonTelegramGateway:
             context="listing dialogs",
         )
 
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        del source_backend
+
+        async def operation() -> SourceDialog | None:
+            try:
+                entity = await self._resolve_entity(dialog_id)
+            except FatalItemError as error:
+                if "Telegram dialog was not found" in str(error):
+                    return None
+                raise
+            return SourceDialog(
+                dialog_id=str(dialog_id),
+                chat_type=self._dialog_type(entity),
+                title=self._dialog_title(entity),
+                has_topics=bool(getattr(entity, "forum", False)),
+            )
+
+        return await self._run_client_operation(
+            operation,
+            context=f"getting dialog {dialog_id}",
+        )
+
     async def list_dialogs(self, manifest: MigrationManifest) -> list[SourceDialog]:
         await self._ensure_started()
         discovered = await self._discover_manifest_dialogs()

@@ -50,6 +50,17 @@ class TelegramExportSnapshotGateway:
     ) -> list[SourceDialog]:
         return []
 
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telegram_export_archive",
+    ) -> SourceDialog | None:
+        snapshot = await self._snapshot_repository.get(dialog_id)
+        if snapshot is None:
+            return None
+        return self._source_dialog_from_snapshot(snapshot)
+
     async def list_dialogs(self, manifest: MigrationManifest) -> list[SourceDialog]:
         dialogs: list[SourceDialog] = []
         for dialog in manifest.dialogs:
@@ -222,6 +233,18 @@ class MultiSourceTelegramGateway:
         return await gateway.list_available_dialogs(
             limit=limit,
             query=query,
+            source_backend=source_backend,
+        )
+
+    async def get_source_dialog(
+        self,
+        dialog_id: str,
+        *,
+        source_backend: str = "telethon_user_session",
+    ) -> SourceDialog | None:
+        gateway = self._gateway_for(source_backend)
+        return await gateway.get_source_dialog(
+            dialog_id,
             source_backend=source_backend,
         )
 
