@@ -71,6 +71,7 @@ class TelegramGateway(Protocol):
         limit: int,
         *,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
         """Fetch an ordered batch of Telegram messages for a dialog."""
 

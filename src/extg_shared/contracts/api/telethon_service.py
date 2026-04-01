@@ -68,6 +68,7 @@ class FetchHistoryRequest(BaseModel):
     cursor: dict[str, Any] | None = None
     limit: int = Field(ge=1)
     source_backend: str = "telethon_user_session"
+    thread_id: str | None = None
 
 
 class DownloadAttachmentRequest(BaseModel):

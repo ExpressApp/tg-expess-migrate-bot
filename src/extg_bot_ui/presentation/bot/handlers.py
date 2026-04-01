@@ -175,7 +175,7 @@ def build_handler_collector(
         except USER_VISIBLE_COMMAND_ERRORS as error:
             await _reply(bot, f"Ошибка: {error}")
             return
-        await _reply(bot, _format_available_chats(result))
+        await _reply(bot, _format_available_chats(result, limit=limit))
 
     @collector.command("/configure", description="Показать или сохранить конфигурацию переноса")
     async def configure_chat(message: IncomingMessage, bot: Bot) -> None:
@@ -539,19 +539,24 @@ def _format_background_operation(
     return f"Операция заблокирована: {result.reason or 'unknown'}"
 
 
-def _format_available_chats(chats: tuple[BotAvailableChat, ...]) -> str:
+def _format_available_chats(
+    chats: tuple[BotAvailableChat, ...],
+    *,
+    limit: int = 20,
+) -> str:
     if not chats:
         return "Доступные Telegram-чаты не найдены."
+    render_limit = max(1, limit)
     lines = ["Доступные чаты:"]
-    for chat in chats[:20]:
+    for chat in chats[:render_limit]:
         lines.append(
             f"- {chat.source_chat_id} | {chat.source_chat_type} | {chat.source_chat_title} "
             f"| configured={'yes' if chat.configured else 'no'} "
             f"| progress={'yes' if chat.has_progress else 'no'} "
             f"| imported={chat.imported_count}/{chat.mapped_total or 0}"
         )
-    if len(chats) > 20:
-        lines.append(f"... +{len(chats) - 20} chats")
+    if len(chats) > render_limit:
+        lines.append(f"... +{len(chats) - render_limit} chats")
     return "\n".join(lines)
 
 

@@ -1180,7 +1180,7 @@ class MigrationBotControlService:
                         source_chat_title=dialog.title,
                         source_chat_type=dialog.chat_type,
                         action="choose_topic_strategy",
-                        topic_titles=tuple(topic.title for topic in topics[:20]),
+                        topic_titles=tuple(topic.title for topic in topics),
                     )
 
             effective_identity_policy = await self._effective_identity_policy(
@@ -1745,6 +1745,19 @@ class MigrationBotControlService:
             )
             await self._validate_manifest_preconditions(manifest)
             source_chat_ids = tuple(dialog.source_chat_id for dialog in manifest.dialogs)
+            if (
+                dialog.has_topics
+                and requested_topic_strategy == "split_by_topic"
+                and len(source_chat_ids) > 1
+            ):
+                return await self._start_fan_out_background_operation(
+                    operator=operator,
+                    aggregate_operation="migrate_chat",
+                    job_operation="migrate_chat",
+                    manifest=manifest,
+                    source_chat_ids=source_chat_ids,
+                    options=options,
+                )
             return await self._start_background_operation(
                 operator=operator,
                 operation="migrate_chat",

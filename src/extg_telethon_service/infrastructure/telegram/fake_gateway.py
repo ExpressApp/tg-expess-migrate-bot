@@ -143,7 +143,9 @@ class FakeTelegramGateway:
         limit: int,
         *,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
+        del thread_id
         self.fetch_calls += 1
         messages = self._messages_by_dialog.get(dialog_id, [])
         start_index = 0

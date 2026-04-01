@@ -220,6 +220,7 @@ class RemoteTelethonServiceClient:
         cursor: HistoryCursor | None,
         limit: int,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
         payload = await self._post_json(
             "/internal/telegram/history/fetch",
@@ -233,6 +234,7 @@ class RemoteTelethonServiceClient:
                 ),
                 limit=limit,
                 source_backend=source_backend,
+                thread_id=thread_id,
             ).model_dump(mode="json"),
         )
         return HISTORY_BATCH_ADAPTER.validate_python(payload)
@@ -541,6 +543,7 @@ class RemoteTelegramGateway:
         limit: int,
         *,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
         return await self._client.fetch_history(
             operator_huid=self._require_operator_huid(),
@@ -548,6 +551,7 @@ class RemoteTelegramGateway:
             cursor=cursor,
             limit=limit,
             source_backend=source_backend,
+            thread_id=thread_id,
         )
 
     async def download_attachment(

@@ -21,7 +21,7 @@ class RetrySettings(BaseModel):
 
 
 class BackfillSettings(BaseModel):
-    batch_size: int = 100
+    batch_size: int = 300
 
 
 class TelegramSettings(BaseModel):

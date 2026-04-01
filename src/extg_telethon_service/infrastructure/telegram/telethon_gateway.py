@@ -150,6 +150,7 @@ class TelethonTelegramGateway:
         limit: int,
         *,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
         entity = await self._resolve_entity(dialog_id)
 
@@ -163,21 +164,22 @@ class TelethonTelegramGateway:
                 ) from error
 
         async def operation() -> HistoryBatch:
-            raw_messages: list[Message] = []
-            async for message in self._client.iter_messages(
-                entity,
-                limit=limit + 1,
+            raw_messages = await self._fetch_history_messages(
+                entity=entity,
                 min_id=min_id,
-                reverse=True,
-            ):
-                if not getattr(message, "id", None):
-                    continue
-                raw_messages.append(message)
+                limit=limit,
+                thread_id=thread_id,
+            )
 
             has_more = len(raw_messages) > limit
             selected = raw_messages[:limit]
             messages = [
-                self._to_source_message(dialog_id=dialog_id, entity=entity, message=item)
+                self._to_source_message(
+                    dialog_id=dialog_id,
+                    entity=entity,
+                    message=item,
+                    thread_id_override=thread_id,
+                )
                 for item in selected
             ]
             next_cursor = None
@@ -482,12 +484,16 @@ class TelethonTelegramGateway:
             message_count = 0
             media_count = 0
             approximate_bytes = 0
-            async for message in self._client.iter_messages(entity, reverse=True):
+            async for message in self._iter_inventory_messages(
+                entity=entity,
+                manifest_dialog=manifest_dialog,
+            ):
                 if not getattr(message, "id", None):
                     continue
                 source_message_id = str(message.id)
-                source_thread_id = self._optional_str(
-                    getattr(message, "reply_to_top_id", None),
+                source_thread_id = (
+                    manifest_dialog.source_thread_id
+                    or self._optional_str(getattr(message, "reply_to_top_id", None))
                 )
                 if not manifest_dialog.matches_source_message(
                     source_message_id=source_message_id,
@@ -517,6 +523,88 @@ class TelethonTelegramGateway:
             operation,
             context=f"estimating dialog {dialog_id}",
         )
+
+    async def _fetch_history_messages(
+        self,
+        *,
+        entity: Any,
+        min_id: int,
+        limit: int,
+        thread_id: str | None,
+    ) -> list[Message]:
+        if thread_id is None:
+            raw_messages: list[Message] = []
+            async for message in self._client.iter_messages(
+                entity,
+                limit=limit + 1,
+                min_id=min_id,
+                reverse=True,
+            ):
+                if not getattr(message, "id", None):
+                    continue
+                raw_messages.append(message)
+            return raw_messages
+
+        thread_root_id = self._parse_thread_id(thread_id)
+        raw_messages: list[Message] = []
+        target_count = max(1, limit) + 1
+
+        if min_id < thread_root_id:
+            root_message = await self._get_message_by_id(entity=entity, message_id=thread_root_id)
+            if root_message is not None:
+                raw_messages.append(root_message)
+
+        remaining_limit = target_count - len(raw_messages)
+        if remaining_limit <= 0:
+            return raw_messages
+
+        async for message in self._client.iter_messages(
+            entity,
+            limit=remaining_limit,
+            min_id=max(min_id, thread_root_id),
+            reverse=True,
+            reply_to=thread_root_id,
+        ):
+            if not getattr(message, "id", None):
+                continue
+            raw_messages.append(message)
+        return raw_messages
+
+    async def _iter_inventory_messages(
+        self,
+        *,
+        entity: Any,
+        manifest_dialog: ManifestDialog,
+    ) -> AsyncIterator[Message]:
+        if manifest_dialog.source_thread_id is None:
+            async for message in self._client.iter_messages(entity, reverse=True):
+                yield message
+            return
+
+        thread_root_id = self._parse_thread_id(manifest_dialog.source_thread_id)
+        root_message = await self._get_message_by_id(entity=entity, message_id=thread_root_id)
+        if root_message is not None:
+            yield root_message
+        async for message in self._client.iter_messages(
+            entity,
+            reverse=True,
+            reply_to=thread_root_id,
+        ):
+            yield message
+
+    async def _get_message_by_id(self, *, entity: Any, message_id: int) -> Message | None:
+        message = await self._client.get_messages(entity, ids=message_id)
+        if isinstance(message, list):
+            return message[0] if message else None
+        return message if getattr(message, "id", None) else None
+
+    def _parse_thread_id(self, thread_id: str) -> int:
+        try:
+            return int(thread_id)
+        except ValueError as error:
+            raise ConfigurationError(
+                f"invalid source_thread_id: {thread_id}",
+            ) from error
 
     async def _resolve_entity(self, dialog_id: str, *, force_refresh: bool = False) -> Any:
         if not force_refresh and dialog_id in self._entity_cache:
@@ -675,6 +763,7 @@ class TelethonTelegramGateway:
         dialog_id: str,
         entity: Any,
         message: Message,
+        thread_id_override: str | None = None,
     ) -> TelegramSourceMessage:
         content_type = self._content_type(message)
         reply_to_message_id = getattr(message, "reply_to_msg_id", None)
@@ -691,7 +780,10 @@ class TelethonTelegramGateway:
             author=self._author(message),
             body=getattr(message, "message", None),
             chat_title=self._dialog_title(entity),
-            thread_id=self._optional_str(getattr(message, "reply_to_top_id", None)),
+            thread_id=(
+                self._optional_str(getattr(message, "reply_to_top_id", None))
+                or thread_id_override
+            ),
             reply_to_message_id=self._optional_str(reply_to_message_id),
             edited_at_utc=self._to_utc(getattr(message, "edit_date", None)),
             deleted_in_source=False,

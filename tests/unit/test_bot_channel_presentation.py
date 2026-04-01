@@ -10,6 +10,7 @@ from extg_bot_ui.application.bot_control import (
     BotChatConfigurationResult,
     BotChatMembersWorkbookRequest,
     BotChannelChatResolutionRequest,
+    BotGroupChatResolutionRequest,
     BotIdentityMappingResult,
     BotMigratedChat,
     BotMigrationStatsResult,
@@ -558,6 +559,42 @@ async def test_chats_handler_formats_available_chats():
 
 
 @pytest.mark.asyncio
+async def test_chats_handler_respects_render_limit():
+    service = FakeBotControlService()
+    service.available_chats = tuple(
+        BotAvailableChat(
+            source_chat_id=f"chat-{index}",
+            source_chat_type="supergroup",
+            source_chat_title=f"Chat {index}",
+            message_count=index,
+            media_count=0,
+            approximate_bytes=100,
+            configured=False,
+            has_progress=False,
+            imported_count=0,
+            mapped_total=0,
+            last_source_message_id=None,
+        )
+        for index in range(1, 32)
+    )
+    collector = build_handler_collector(
+        service=service,
+        telegram_session_service=FakeTelegramSessionService(),
+        default_batch_size=20,
+    )
+    handler = collector._user_commands_handlers["/chats"].handler_func
+    message = FakeMessage(argument="limit=30")
+    bot = FakeBot()
+
+    await handler(message, bot)
+
+    rendered = str(bot.calls[0][0])
+    assert "chat-30 | supergroup | Chat 30" in rendered
+    assert "chat-31 | supergroup | Chat 31" not in rendered
+    assert "... +1 chats" in rendered
+
+
+@pytest.mark.asyncio
 async def test_migrate_chat_handler_routes_channel_resolution_before_start():
     service = FakeBotControlService()
     service.channel_request = BotChannelChatResolutionRequest(
@@ -586,6 +623,34 @@ async def test_migrate_chat_handler_routes_channel_resolution_before_start():
     assert message.state.fsm.change_calls[-1][0] is MigrationWizardState.INPUT_CHANNEL_ACCESS_STRATEGY
     assert "direct_add" in str(bot.calls[0][0])
     assert "invite_link" in str(bot.calls[0][0])
+
+
+@pytest.mark.asyncio
+async def test_migrate_chat_handler_renders_all_forum_topics_without_truncation():
+    service = FakeBotControlService()
+    service.group_request = BotGroupChatResolutionRequest(
+        source_chat_id="forum-1",
+        source_chat_title="Big Forum",
+        source_chat_type="supergroup",
+        action="choose_topic_strategy",
+        topic_titles=tuple(f"Topic {index}" for index in range(1, 13)),
+    )
+    collector = build_handler_collector(
+        service=service,
+        telegram_session_service=SimpleNamespace(),
+        default_batch_size=20,
+    )
+    handler = collector._user_commands_handlers["/migrate"].handler_func
+    message = FakeMessage(argument="forum-1")
+    bot = FakeBot()
+
+    await handler(message, bot)
+
+    response = str(bot.calls[0][0])
+    assert [call[0] for call in service.calls] == ["prepare_private", "prepare_group"]
+    assert message.state.fsm.change_calls[-1][0] is MigrationWizardState.INPUT_GROUP_TOPIC_STRATEGY
+    assert "- Topic 12" in response
+    assert "... +" not in response
 
 
 @pytest.mark.asyncio

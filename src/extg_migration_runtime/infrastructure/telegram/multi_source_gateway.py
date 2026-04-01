@@ -75,7 +75,9 @@ class TelegramExportSnapshotGateway:
         limit: int,
         *,
         source_backend: str = "telegram_export_archive",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
+        del thread_id
         snapshot = await self._require_snapshot(dialog_id)
         messages = await self._messages_for(dialog_id, snapshot)
         start_index = 0
@@ -249,12 +251,14 @@ class MultiSourceTelegramGateway:
         limit: int,
         *,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
         return await self._gateway_for(source_backend).fetch_history(
             dialog_id,
             cursor,
             limit,
             source_backend=source_backend,
+            thread_id=thread_id,
         )
 
     async def download_attachment(

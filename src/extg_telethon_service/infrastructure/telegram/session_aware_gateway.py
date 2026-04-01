@@ -68,6 +68,7 @@ class SessionAwareTelegramGateway:
         limit: int,
         *,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
         gateway = await self._gateway()
         return await gateway.fetch_history(
@@ -75,6 +76,7 @@ class SessionAwareTelegramGateway:
             cursor,
             limit,
             source_backend=source_backend,
+            thread_id=thread_id,
         )
 
     async def download_attachment(

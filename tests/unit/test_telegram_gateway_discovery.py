@@ -202,13 +202,44 @@ class FailingDialogIterator:
 
 
 class StubHistoryClient(StubTelethonClient):
-    def __init__(self, dialogs: list[SimpleNamespace], messages: list[SimpleNamespace]) -> None:
+    def __init__(
+        self,
+        dialogs: list[SimpleNamespace],
+        messages: list[SimpleNamespace],
+        *,
+        replies_by_thread_id: dict[int, list[SimpleNamespace]] | None = None,
+    ) -> None:
         super().__init__(dialogs)
         self._messages = messages
+        self._replies_by_thread_id = replies_by_thread_id or {}
 
-    def iter_messages(self, entity, limit: int, min_id: int, reverse: bool):
-        del entity, min_id, reverse
-        return StubMessageIterator(self._messages, limit)
+    def iter_messages(
+        self,
+        entity,
+        limit: int | None = None,
+        min_id: int = 0,
+        reverse: bool = False,
+        reply_to: int | None = None,
+    ):
+        del entity, reverse
+        messages = (
+            self._replies_by_thread_id.get(reply_to, [])
+            if reply_to is not None
+            else self._messages
+        )
+        filtered = [
+            message
+            for message in messages
+            if int(getattr(message, "id", 0) or 0) > min_id
+        ]
+        return StubMessageIterator(filtered, limit or len(filtered))
+
+    async def get_messages(self, entity, ids):
+        del entity
+        for message in self._messages:
+            if getattr(message, "id", None) == ids:
+                return message
+        return None
 
 
 class StubInventoryClient(StubTelethonClient):
@@ -216,15 +247,34 @@ class StubInventoryClient(StubTelethonClient):
         self,
         dialogs: list[SimpleNamespace],
         messages_by_entity_id: dict[str, list[SimpleNamespace]],
+        *,
+        replies_by_entity_and_thread_id: dict[tuple[str, int], list[SimpleNamespace]] | None = None,
     ) -> None:
         super().__init__(dialogs)
         self._messages_by_entity_id = messages_by_entity_id
+        self._replies_by_entity_and_thread_id = replies_by_entity_and_thread_id or {}
 
-    def iter_messages(self, entity, reverse: bool = True):
+    def iter_messages(
+        self,
+        entity,
+        reverse: bool = True,
+        reply_to: int | None = None,
+    ):
         del reverse
-        return StubUnboundedMessageIterator(
-            self._messages_by_entity_id.get(str(getattr(entity, "id", "")), []),
+        entity_id = str(getattr(entity, "id", ""))
+        messages = (
+            self._replies_by_entity_and_thread_id.get((entity_id, reply_to), [])
+            if reply_to is not None
+            else self._messages_by_entity_id.get(entity_id, [])
         )
+        return StubUnboundedMessageIterator(messages)
+
+    async def get_messages(self, entity, ids):
+        entity_id = str(getattr(entity, "id", ""))
+        for message in self._messages_by_entity_id.get(entity_id, []):
+            if getattr(message, "id", None) == ids:
+                return message
+        return None
 
 
 class DiscoveringEntityClient(StubTelethonClient):
@@ -362,6 +412,78 @@ async def test_telethon_gateway_fetch_history_sanitizes_binary_raw_payload() -> 
 
 
 @pytest.mark.asyncio
+async def test_telethon_gateway_fetch_history_reads_topic_thread_history() -> None:
+    dialog = _telethon_dialog(101, "Forum Chat")
+    starter = SimpleNamespace(
+        id=10,
+        date=datetime(2026, 3, 25, 12, 0, tzinfo=UTC),
+        message="Topic starter",
+        reply_to_msg_id=None,
+        reply_to=None,
+        reply_to_top_id=None,
+        edit_date=None,
+        sticker=None,
+        photo=None,
+        voice=None,
+        video=None,
+        audio=None,
+        document=None,
+        poll=None,
+        action=None,
+        file=None,
+        entities=[],
+        sender=None,
+        sender_id=42,
+        post_author=None,
+        to_dict=lambda: {"_": "Message"},
+    )
+    reply = SimpleNamespace(
+        id=11,
+        date=datetime(2026, 3, 25, 12, 1, tzinfo=UTC),
+        message="Topic reply",
+        reply_to_msg_id=10,
+        reply_to=SimpleNamespace(reply_to_msg_id=10),
+        reply_to_top_id=None,
+        edit_date=None,
+        sticker=None,
+        photo=None,
+        voice=None,
+        video=None,
+        audio=None,
+        document=None,
+        poll=None,
+        action=None,
+        file=None,
+        entities=[],
+        sender=None,
+        sender_id=42,
+        post_author=None,
+        to_dict=lambda: {"_": "Message"},
+    )
+    client = StubHistoryClient(
+        [dialog],
+        [starter],
+        replies_by_thread_id={10: [reply]},
+    )
+    gateway = TelethonTelegramGateway(
+        api_id=None,
+        api_hash=None,
+        session_string=None,
+        client=client,
+    )
+
+    batch = await gateway.fetch_history(
+        "101",
+        cursor=None,
+        limit=10,
+        thread_id="10",
+    )
+
+    assert [message.message_id for message in batch.messages] == ["10", "11"]
+    assert [message.thread_id for message in batch.messages] == ["10", "10"]
+
+
+@pytest.mark.asyncio
 async def test_telethon_gateway_resolves_private_entity_from_dialog_discovery_cache() -> None:
     dialog = _telethon_dialog(5843438842, "Private Dialog")
     client = DiscoveringEntityClient([dialog])
@@ -463,3 +585,68 @@ async def test_telethon_gateway_list_dialogs_estimates_manifest_inventory() -> N
     assert dialogs[0].message_count == 2
     assert dialogs[0].media_count == 1
     assert dialogs[0].approximate_bytes == len("hello".encode("utf-8")) + len("photo".encode("utf-8")) + 42
+
+
+@pytest.mark.asyncio
+async def test_telethon_gateway_list_dialogs_estimates_topic_inventory_from_thread_history() -> None:
+    dialog = _telethon_dialog(101, "Forum Chat")
+    starter = SimpleNamespace(
+        id=10,
+        message="Topic starter",
+        reply_to_top_id=None,
+        file=None,
+    )
+    reply = SimpleNamespace(
+        id=11,
+        message="Topic reply",
+        reply_to_top_id=None,
+        file=SimpleNamespace(size=7),
+    )
+    general = SimpleNamespace(
+        id=99,
+        message="General message",
+        reply_to_top_id=None,
+        file=None,
+    )
+    client = StubInventoryClient(
+        [dialog],
+        {"101": [starter, general]},
+        replies_by_entity_and_thread_id={("101", 10): [reply]},
+    )
+    gateway = TelethonTelegramGateway(
+        api_id=None,
+        api_hash=None,
+        session_string=None,
+        client=client,
+    )
+    manifest = MigrationManifest.model_validate(
+        {
+            "migration_id": "migration-1",
+            "mode": "backfill_delta_cutover",
+            "dialogs": [
+                {
+                    "source_chat_id": "101#topic:201",
+                    "source_chat_type": "supergroup",
+                    "target_strategy": "create",
+                    "target_title": "Forum Chat / Topic",
+                    "telegram_chat_id": "101",
+                    "source_topic_id": "201",
+                    "source_thread_id": "10",
+                    "source_thread_title": "Topic",
+                },
+            ],
+        },
+    )
+
+    dialogs = await gateway.list_dialogs(manifest)
+
+    assert len(dialogs) == 1
+    assert dialogs[0].dialog_id == "101#topic:201"
+    assert dialogs[0].title == "Topic"
+    assert dialogs[0].message_count == 2
+    assert dialogs[0].media_count == 1
+    assert dialogs[0].approximate_bytes == (
+        len("Topic starter".encode("utf-8"))
+        + len("Topic reply".encode("utf-8"))
+        + 7
+    )

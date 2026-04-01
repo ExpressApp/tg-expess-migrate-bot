@@ -62,6 +62,7 @@ class TelethonIntegrationService:
         cursor: HistoryCursor | None,
         limit: int,
         source_backend: str = "telethon_user_session",
+        thread_id: str | None = None,
     ) -> HistoryBatch:
         async with self._bind_operator(operator_huid, mark_used=True):
             return await self._telegram_gateway.fetch_history(
@@ -69,6 +70,7 @@ class TelethonIntegrationService:
                 cursor,
                 limit,
                 source_backend=source_backend,
+                thread_id=thread_id,
             )
 
     async def download_attachment(

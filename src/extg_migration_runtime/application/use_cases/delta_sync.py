@@ -281,6 +281,7 @@ class DeltaSyncUseCase:
                     cursor,
                     command.batch_size,
                     source_backend=dialog.source_backend,
+                    thread_id=dialog.source_thread_id,
                 ),
             )
             if not batch.messages:

@@ -193,6 +193,7 @@ def create_telethon_service_app(
                 cursor=parsed_cursor,
                 limit=request.limit,
                 source_backend=request.source_backend,
+                thread_id=request.thread_id,
             )
             return HISTORY_BATCH_ADAPTER.dump_python(result, mode="json")
         except Exception as error:

@@ -881,8 +881,15 @@ def _format_background_operation_for_wizard(result: BotOperationAcceptedResult) 
         f"operation={result.operation}",
         f"migration_id={result.migration_id}",
     ]
-    if result.job_key:
-        lines.append(f"job_key={result.job_key}")
+    job_keys = result.job_keys or ((result.job_key,) if result.job_key else ())
+    if len(job_keys) == 1:
+        lines.append(f"job_key={job_keys[0]}")
+    elif job_keys:
+        lines.append(f"accepted_jobs={len(job_keys)}")
+        lines.append("job_keys:")
+        lines.extend(f"- {job_key}" for job_key in job_keys[:10])
+        if len(job_keys) > 10:
+            lines.append(f"... +{len(job_keys) - 10} jobs")
     if result.source_chat_ids:
         lines.append(f"source_chat_ids={','.join(result.source_chat_ids)}")
     if result.reason:
@@ -987,10 +994,8 @@ async def begin_group_chat_resolution(
         ]
         if request.topic_titles:
             lines.extend(["", "Темы:"])
-            for title in request.topic_titles[:10]:
+            for title in request.topic_titles:
                 lines.append(f"- {title}")
-            if len(request.topic_titles) > 10:
-                lines.append(f"... +{len(request.topic_titles) - 10} topics")
         await bot.answer_message(
             "\n".join(lines),
             wait_callback=False,
