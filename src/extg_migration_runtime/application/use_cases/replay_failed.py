@@ -181,7 +181,12 @@ class ReplayFailedUseCase:
             "skipped": 0,
         }
         migrate_media = self._resolve_migrate_media(manifest=manifest, dialog=dialog)
+        media_kinds = self._resolve_media_kinds(manifest=manifest, dialog=dialog)
         reply_mode = self._resolve_reply_mode(manifest=manifest, dialog=dialog)
+        output_template = self._resolve_output_template(
+            manifest=manifest,
+            dialog=dialog,
+        )
 
         while remaining_message_ids:
             batch = await self._retry_policy.run(
@@ -233,6 +238,7 @@ class ReplayFailedUseCase:
                                 canonical=next_canonical,
                                 source_backend=dialog.source_backend,
                                 migrate_media=migrate_media,
+                                media_kinds=media_kinds,
                             ),
                         )
                         break
@@ -270,7 +276,9 @@ class ReplayFailedUseCase:
                         ),
                         reply_preview=reply_preview,
                         migrate_media=migrate_media,
+                        media_kinds=media_kinds,
                         reply_mode=reply_mode,
+                        output_template=output_template,
                         prefetched_attachments=prefetched_attachments,
                     )
                     counts[outcome] += 1
@@ -342,7 +350,9 @@ class ReplayFailedUseCase:
         source_chat_title: str | None,
         reply_preview: ReplyPreview | None,
         migrate_media: bool,
+        media_kinds: tuple[str, ...] | None,
         reply_mode: str,
+        output_template: str | None,
         prefetched_attachments: tuple[PrefetchedAttachment, ...] | None = None,
     ) -> str:
         existing_primary_message: SentMessageRef | None = None
@@ -361,7 +371,9 @@ class ReplayFailedUseCase:
                 source_chat_title=source_chat_title,
                 reply_preview=reply_preview,
                 migrate_media=migrate_media,
+                media_kinds=media_kinds,
                 reply_mode=reply_mode,
+                output_template=output_template,
                 existing_primary_message=existing_primary_message,
                 existing_rendered_body=current_record.rendered_body,
                 retry_failed_attachments=True,
@@ -522,6 +534,16 @@ class ReplayFailedUseCase:
             return dialog.migrate_media
         return manifest.defaults.migrate_media
 
+    def _resolve_media_kinds(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> tuple[str, ...] | None:
+        if dialog.media_kinds is not None:
+            return dialog.media_kinds
+        return manifest.defaults.media_kinds
+
     def _resolve_reply_mode(
         self,
         *,
@@ -531,6 +553,16 @@ class ReplayFailedUseCase:
         if dialog.reply_mode is not None:
             return dialog.reply_mode
         return manifest.defaults.reply_mode
+
+    def _resolve_output_template(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> str | None:
+        if dialog.output_template is not None:
+            return dialog.output_template
+        return manifest.defaults.output_template
 
     def _attachment_failure_payload(
         self,

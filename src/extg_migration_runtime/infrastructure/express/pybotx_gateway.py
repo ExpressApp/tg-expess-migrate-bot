@@ -992,7 +992,7 @@ class PybotxExpressGateway:
                 is_async_file=False,
                 content=content,
             )
-        if media_kind == "video":
+        if media_kind in {"video", "video_note"}:
             return AttachmentVideo(
                 type=AttachmentTypes.VIDEO,
                 filename=attachment_name,

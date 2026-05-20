@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from io import BytesIO
 from dataclasses import replace
 from datetime import UTC
 
-from pybotx import Bot, IncomingMessage
+from openpyxl import Workbook
+from pybotx import Bot, BubbleMarkup, IncomingMessage
 from pybotx.bot.handler_collector import HandlerCollector
+from pybotx.models.attachments import OutgoingAttachment
 
 from extg_bot_ui.application.bot_control import (
     BotActiveJob,
@@ -14,6 +17,8 @@ from extg_bot_ui.application.bot_control import (
     BotChatMembersAddResult,
     BotChatUserMatrixResult,
     BotIdentityMappingResult,
+    BotMainStatusChat,
+    BotMainStatusResult,
     BotMigratedChat,
     BotMigrationStatsResult,
     BotOperationAcceptedResult,
@@ -48,17 +53,24 @@ from extg_bot_ui.presentation.bot.command_parser import (
     parse_optional_source_chat_id,
     parse_replay_failed_options,
 )
+from extg_bot_ui.presentation.bot.menus import (
+    show_connected_menu,
+    show_main_menu,
+)
 from extg_bot_ui.presentation.bot.wizard import (
     begin_archive_import,
+    begin_chat_migration_selection,
     begin_chat_members_selection,
     begin_chat_members_workbook,
     begin_channel_chat_resolution,
+    begin_operator_defaults_configuration,
     begin_group_chat_resolution,
     begin_private_chat_resolution,
 )
 from extg_bot_ui.presentation.bot.telegram_session_wizard import (
     begin_telegram_connection,
 )
+from extg_bot_ui.presentation.bot.screen import render_screen
 
 USER_VISIBLE_OPERATION_ERRORS = (
     ConfigurationError,
@@ -109,9 +121,237 @@ def build_handler_collector(
         await message.state.fsm.drop_state()
         await _reply(bot, _format_telegram_disconnect_result(result))
 
+    async def _show_main_menu(message: IncomingMessage, bot: Bot, *, notice: str | None = None) -> None:
+        await message.state.fsm.drop_state()
+        await show_main_menu(bot, message=message, notice=notice)
+
+    async def _show_connected_menu(
+        message: IncomingMessage,
+        bot: Bot,
+        *,
+        notice: str | None = None,
+    ) -> None:
+        await message.state.fsm.drop_state()
+        await show_connected_menu(bot, message=message, notice=notice)
+
+    async def _handle_main_phone_flow(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            status = await telegram_session_service.status(
+                operator_huid=str(message.sender.huid),
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        if status.connected:
+            await show_connected_menu(
+                bot,
+                message=message,
+                notice="Учетная запись Telegram уже подключена.",
+            )
+            return
+        await begin_telegram_connection(
+            message=message,
+            bot=bot,
+            service=telegram_session_service,
+            phone_number=None,
+        )
+
+    async def _handle_main_status(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        await render_screen(
+            message=message,
+            bot=bot,
+            body="Какой статус миграций нужно показать?",
+            bubbles=_main_status_keyboard(),
+        )
+
+    async def _handle_main_configure(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            await begin_operator_defaults_configuration(
+                message=message,
+                bot=bot,
+                service=service,
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+
+    async def _handle_main_add_users(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            chats = await service.list_migrated_chats_for_user_addition(
+                operator=_operator_from_message(message),
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        await begin_chat_members_selection(
+            message=message,
+            bot=bot,
+            chats=chats,
+        )
+
+    async def _handle_main_migrate_chats(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            status = await telegram_session_service.status(
+                operator_huid=str(message.sender.huid),
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        if not status.connected:
+            await begin_telegram_connection(
+                message=message,
+                bot=bot,
+                service=telegram_session_service,
+                phone_number=None,
+            )
+            return
+        try:
+            chats = await service.list_available_chats(
+                operator=_operator_from_message(message),
+                limit=1000,
+                query=None,
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        await begin_chat_migration_selection(
+            message=message,
+            bot=bot,
+            chats=chats,
+        )
+
+    async def _handle_main_logout(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            result = await telegram_session_service.disconnect(
+                operator_huid=str(message.sender.huid),
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        await show_main_menu(
+            bot,
+            message=message,
+            notice=(
+                "Вы вышли из учетной записи Telegram."
+                if result.disconnected
+                else "Привязанная Telegram session не найдена."
+            ),
+            phone_button_label="Авторизоваться по номеру",
+            json_button_label="Загрузить JSON",
+        )
+
     @collector.command("/help", description="Показать команды управления переносом")
     async def help_command(message: IncomingMessage, bot: Bot) -> None:
         await _handle_help(bot)
+
+    @collector.command("/справка", description="Открыть главное меню и справку")
+    async def help_alias_command(message: IncomingMessage, bot: Bot) -> None:
+        await _show_main_menu(message, bot)
+
+    @collector.command("/start", description="Открыть главное меню")
+    async def start_command(message: IncomingMessage, bot: Bot) -> None:
+        await _show_main_menu(message, bot)
+
+    @collector.command("/menu", description="Открыть главное меню")
+    async def menu_command(message: IncomingMessage, bot: Bot) -> None:
+        await _show_main_menu(message, bot)
+
+    @collector.command("/main_phone", description="Внутренний flow: миграция через номер")
+    async def main_phone(message: IncomingMessage, bot: Bot) -> None:
+        await _handle_main_phone_flow(message, bot)
+
+    @collector.command("/main_json", description="Внутренний flow: миграция через JSON")
+    async def main_json(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        await begin_archive_import(message=message, bot=bot)
+
+    @collector.command("/main_configure", description="Внутренний flow: конфигурация")
+    async def main_configure(message: IncomingMessage, bot: Bot) -> None:
+        await _handle_main_configure(message, bot)
+
+    @collector.command("/main_status", description="Внутренний flow: статус миграции")
+    async def main_status(message: IncomingMessage, bot: Bot) -> None:
+        await _handle_main_status(message, bot)
+
+    @collector.command("/main_status_active", description="Внутренний flow: активные миграции")
+    async def main_status_active(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            result = await service.main_status_overview(
+                operator=_operator_from_message(message),
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        await render_screen(
+            message=message,
+            bot=bot,
+            body=_format_active_status_screen(result),
+            bubbles=_status_list_keyboard(),
+        )
+
+    @collector.command("/main_status_completed", description="Внутренний flow: завершенные миграции")
+    async def main_status_completed(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            result = await service.main_status_overview(
+                operator=_operator_from_message(message),
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        await render_screen(
+            message=message,
+            bot=bot,
+            body=_format_completed_status_preview(result),
+            bubbles=_completed_status_preview_keyboard(),
+        )
+
+    @collector.command(
+        "/main_status_completed_all",
+        description="Внутренний flow: полный список завершенных миграций",
+    )
+    async def main_status_completed_all(message: IncomingMessage, bot: Bot) -> None:
+        await message.state.fsm.drop_state()
+        try:
+            result = await service.main_status_overview(
+                operator=_operator_from_message(message),
+            )
+        except USER_VISIBLE_OPERATION_ERRORS as error:
+            await _reply(bot, f"Ошибка: {error}")
+            return
+        completed_chats = result.completed_chats
+        attachment = None
+        if completed_chats:
+            attachment = OutgoingAttachment(
+                content=_build_completed_migrations_workbook(completed_chats),
+                filename="завершенные.xlsx",
+            )
+        await render_screen(
+            message=message,
+            bot=bot,
+            body=_format_completed_status_full(result),
+            bubbles=_status_list_keyboard(),
+            file=attachment,
+        )
+
+    @collector.command("/main_add_users", description="Внутренний flow: добавление участников")
+    async def main_add_users(message: IncomingMessage, bot: Bot) -> None:
+        await _handle_main_add_users(message, bot)
+
+    @collector.command("/main_migrate_chats", description="Внутренний flow: меню миграции чатов")
+    async def main_migrate_chats(message: IncomingMessage, bot: Bot) -> None:
+        await _handle_main_migrate_chats(message, bot)
+
+    @collector.command("/main_logout", description="Внутренний flow: выход из Telegram УЗ")
+    async def main_logout(message: IncomingMessage, bot: Bot) -> None:
+        await _handle_main_logout(message, bot)
 
     @collector.command("/connect", description="Подключить свою Telegram УЗ")
     async def connect_telegram(message: IncomingMessage, bot: Bot) -> None:
@@ -391,16 +631,127 @@ def build_handler_collector(
 
     @collector.default_message_handler
     async def default_message(message: IncomingMessage, bot: Bot) -> None:
-        await _reply(
-            bot,
-            "Неизвестная команда.\n\n" + _help_text(),
-        )
+        body = (message.body or "").strip()
+        if body.startswith("/"):
+            await _reply(
+                bot,
+                "Неизвестная команда.\n\n" + _help_text(),
+            )
+            return
+        await show_main_menu(bot, message=message)
 
     return collector
 
 
 async def _reply(bot: Bot, body: str) -> None:
     await bot.answer_message(body, wait_callback=False)
+
+
+def _main_status_keyboard() -> BubbleMarkup:
+    bubbles = BubbleMarkup()
+    bubbles.add_button("Активные миграции", command="/main_status_active")
+    bubbles.add_button("Завершенные миграции", command="/main_status_completed")
+    bubbles.add_button("Главное меню", command="/menu")
+    return bubbles
+
+
+def _status_list_keyboard() -> BubbleMarkup:
+    bubbles = BubbleMarkup()
+    bubbles.add_button("Назад", command="/main_status")
+    bubbles.add_button("Главное меню", command="/menu")
+    return bubbles
+
+
+def _completed_status_preview_keyboard() -> BubbleMarkup:
+    bubbles = BubbleMarkup()
+    bubbles.add_button("Все завершенные", command="/main_status_completed_all")
+    bubbles.add_button("Назад", command="/main_status")
+    bubbles.add_button("Главное меню", command="/menu")
+    return bubbles
+
+
+def _back_to_main_menu_keyboard() -> BubbleMarkup:
+    bubbles = BubbleMarkup()
+    bubbles.add_button("Главное меню", command="/menu")
+    return bubbles
+
+
+def _format_status_chat_line(chat: BotMainStatusChat) -> str:
+    source_total = chat.source_message_count or 0
+    line = (
+        f"{chat.source_chat_id} | {chat.source_chat_title} | "
+        f"imported = {chat.imported_count}/{source_total}"
+    )
+    if (
+        chat.member_success_count is not None
+        and chat.member_total_count is not None
+    ):
+        line += f" | members = {chat.member_success_count}/{chat.member_total_count}"
+    return line
+
+
+def _format_active_status_screen(result: BotMainStatusResult) -> str:
+    chats = result.active_chats
+    lines = ["Список активных миграций:"]
+    if not chats:
+        lines.append("Активные миграции не найдены.")
+        return "\n".join(lines)
+    lines.extend(["", *(_format_status_chat_line(chat) for chat in chats)])
+    return "\n".join(lines)
+
+
+def _format_completed_status_preview(result: BotMainStatusResult) -> str:
+    chats = result.completed_chats
+    lines = ["Последние завершенные миграции:"]
+    if not chats:
+        lines.append("Завершенные миграции не найдены.")
+        return "\n".join(lines)
+    lines.extend(["", *(_format_status_chat_line(chat) for chat in chats[:5])])
+    return "\n".join(lines)
+
+
+def _format_completed_status_full(result: BotMainStatusResult) -> str:
+    chats = result.completed_chats
+    lines = ["Последние завершенные миграции:"]
+    if not chats:
+        lines.append("Завершенные миграции не найдены.")
+        return "\n".join(lines)
+    lines.extend(["", *(_format_status_chat_line(chat) for chat in chats)])
+    return "\n".join(lines)
+
+
+def _build_completed_migrations_workbook(chats: tuple[BotMainStatusChat, ...]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "completed_migrations"
+    sheet.append(
+        [
+            "source_chat_id",
+            "source_chat_title",
+            "source_chat_type",
+            "imported_count",
+            "source_message_count",
+            "member_success_count",
+            "member_total_count",
+            "updated_at_utc",
+        ],
+    )
+    for chat in chats:
+        sheet.append(
+            [
+                chat.source_chat_id,
+                chat.source_chat_title,
+                chat.source_chat_type,
+                chat.imported_count,
+                chat.source_message_count,
+                chat.member_success_count,
+                chat.member_total_count,
+                chat.updated_at.isoformat() if chat.updated_at is not None else None,
+            ],
+        )
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def _is_show_configuration_request(options: object) -> bool:
@@ -419,6 +770,7 @@ def _is_show_configuration_request(options: object) -> bool:
         and options.access_strategy is None
         and options.topic_strategy is None
         and options.skip_in_all is None
+        and not options.excluded_source_chat_ids
         and options.progress_policy == "resume"
         and options.batch_size is None
     )
@@ -560,39 +912,65 @@ def _format_available_chats(
     return "\n".join(lines)
 
 
+def _format_media_summary(
+    migrate_media: bool,
+    media_kinds: tuple[str, ...] | None,
+) -> str:
+    if not migrate_media:
+        return "не переносить"
+    if not media_kinds:
+        return "все типы"
+    return ", ".join(media_kinds)
+
+
+def _format_period_summary(include_from: str | None, include_to: str | None) -> str:
+    return f"{include_from or 'с первого сообщения'} - {include_to or 'по текущий день'}"
+
+
+def _format_output_format_summary(reply_mode: str, output_template: str | None) -> str:
+    if output_template:
+        return f"кастомный шаблон: {output_template}"
+    mapping = {
+        "inline_quote": "по умолчанию",
+        "source_id": "с id исходного reply",
+        "none": "без reply-блока",
+    }
+    return mapping.get(reply_mode, reply_mode)
+
+
 def _format_chat_configuration(result: BotChatConfigurationResult) -> str:
     lines = [
-        f"migration_id={result.migration_id}",
-        f"source_chat_id={result.source_chat_id}",
-        f"source_chat_type={result.source_chat_type}",
-        f"source_chat_title={result.source_chat_title}",
-        f"target_strategy={result.target_strategy}",
-        f"access={result.access_strategy}",
-        f"format={result.reply_mode}",
-        f"media={'on' if result.migrate_media else 'off'}",
-        f"skip_in_all={'yes' if result.skip_in_all else 'no'}",
-        f"target_title={result.target_title or '-'}",
-        f"target_chat_id={result.target_chat_id or '-'}",
-        f"include_from={result.include_from or '-'}",
-        f"include_to={result.include_to or '-'}",
+        "Текущая конфигурация миграции:",
+        f"Migration ID: {result.migration_id}",
+        f"Чат: {result.source_chat_title} ({result.source_chat_id})",
+        f"Тип источника: {result.source_chat_type}",
+        f"Целевой режим: {result.target_strategy}",
+        f"Целевой чат: {result.target_title or '-'}",
+        f"Целевой chat id: {result.target_chat_id or '-'}",
+        f"Период: {_format_period_summary(result.include_from, result.include_to)}",
+        f"Вложения: {_format_media_summary(result.migrate_media, result.media_kinds)}",
+        f"Сервисные сообщения: {'да' if result.service_messages else 'нет'}",
+        f"Формат вывода: {_format_output_format_summary(result.reply_mode, result.output_template)}",
+        f"Добавление участников: {result.access_strategy}",
+        f"Исключать из migrate_all: {'да' if result.skip_in_all else 'нет'}",
     ]
     if result.topic_strategy != "single_chat":
-        lines.append(f"topic_strategy={result.topic_strategy}")
+        lines.append(f"Обсуждения в супергруппе: {result.topic_strategy}")
     if result.telegram_chat_id:
-        lines.append(f"telegram_chat_id={result.telegram_chat_id}")
+        lines.append(f"Telegram chat id: {result.telegram_chat_id}")
     if result.source_thread_id:
-        lines.append(f"source_thread_id={result.source_thread_id}")
+        lines.append(f"Source thread id: {result.source_thread_id}")
     if result.source_thread_title:
-        lines.append(f"source_thread_title={result.source_thread_title}")
+        lines.append(f"Тема/обсуждение: {result.source_thread_title}")
     if result.progress_hint is not None:
         lines.extend(
             [
                 "",
                 "Найден существующий прогресс:",
                 (
-                    f"mapped={result.progress_hint.mapped_total} "
-                    f"imported={result.progress_hint.imported_count} "
-                    f"last_source_message_id={result.progress_hint.last_source_message_id or '-'}"
+                    f"Сообщений сопоставлено: {result.progress_hint.mapped_total}, "
+                    f"импортировано: {result.progress_hint.imported_count}, "
+                    f"последний source_message_id: {result.progress_hint.last_source_message_id or '-'}"
                 ),
             ],
         )
@@ -601,13 +979,14 @@ def _format_chat_configuration(result: BotChatConfigurationResult) -> str:
 
 def _format_identity_mapping_result(result: BotIdentityMappingResult) -> str:
     return (
-        f"telegram_user_id={result.telegram_user_id or '-'}\n"
-        f"telegram_username={('@' + result.telegram_username) if result.telegram_username else '-'}\n"
-        f"telegram_display_name={result.telegram_display_name or '-'}\n"
-        f"corporate_email={result.corporate_email or '-'}\n"
-        f"target_huid={result.target_huid or '-'}\n"
-        f"resolution_source={result.resolution_source}\n"
-        f"reason={result.reason or '-'}"
+        "Результат сопоставления пользователя:\n"
+        f"Telegram user id: {result.telegram_user_id or '-'}\n"
+        f"Telegram username: {('@' + result.telegram_username) if result.telegram_username else '-'}\n"
+        f"Имя в Telegram: {result.telegram_display_name or '-'}\n"
+        f"Корпоративный email: {result.corporate_email or '-'}\n"
+        f"Target HUID: {result.target_huid or '-'}\n"
+        f"Источник сопоставления: {result.resolution_source}\n"
+        f"Примечание: {result.reason or '-'}"
     )
 
 
@@ -690,26 +1069,23 @@ def _format_chat_members_add_result(result: BotChatMembersAddResult) -> str:
 
 def _format_status_result(result: MigrationBotStatusResult) -> str:
     lines = [
-        f"migration_id={result.migration_id}",
-        f"migration_state={(result.migration_state.value if result.migration_state else 'active')}",
+        "Статус миграции:",
+        f"Migration ID: {result.migration_id}",
+        f"Состояние: {(result.migration_state.value if result.migration_state else 'active')}",
+        f"Активных фоновых задач: {len(result.active_jobs)}",
+        f"Чатов с вниманием: {result.reconcile.attention_chats} из {result.reconcile.chats_total}",
         (
-            f"active_jobs={len(result.active_jobs)}"
-            if result.active_jobs
-            else "active_jobs=0"
+            "Сообщения: "
+            f"импортировано {result.reconcile.imported_count}, "
+            f"ошибок {result.reconcile.failed_count}, "
+            f"неоднозначных {result.reconcile.ambiguous_count}, "
+            f"в обработке {result.reconcile.processing_count}"
         ),
         (
-            f"attention_chats={result.reconcile.attention_chats}/{result.reconcile.chats_total}"
-        ),
-        (
-            f"messages imported={result.reconcile.imported_count} "
-            f"failed={result.reconcile.failed_count} "
-            f"ambiguous={result.reconcile.ambiguous_count} "
-            f"processing={result.reconcile.processing_count}"
-        ),
-        (
-            f"attachments imported={result.reconcile.attachment_imported_count} "
-            f"failed={result.reconcile.attachment_failed_count} "
-            f"ambiguous={result.reconcile.attachment_ambiguous_count}"
+            "Вложения: "
+            f"импортировано {result.reconcile.attachment_imported_count}, "
+            f"ошибок {result.reconcile.attachment_failed_count}, "
+            f"неоднозначных {result.reconcile.attachment_ambiguous_count}"
         ),
     ]
     if result.active_jobs:
@@ -783,13 +1159,13 @@ def _format_configure_chat_selector(chats: tuple[BotAvailableChat, ...]) -> str:
     if not chats:
         return "Доступные Telegram-чаты не найдены. Проверь /connect и затем попробуй /chats."
     lines = [
-        "Укажи source_chat_id: `/configure <source_chat_id>`.",
+        "Укажите `source_chat_id`: `/configure <source_chat_id>`.",
         "Первые доступные чаты:",
     ]
     for chat in chats[:10]:
         lines.append(
             f"- {chat.source_chat_id} | {chat.source_chat_title} "
-            f"| configured={'yes' if chat.configured else 'no'}",
+            f"| конфиг есть: {'да' if chat.configured else 'нет'}",
         )
     if len(chats) > 10:
         lines.append(f"... +{len(chats) - 10} chats")
@@ -797,7 +1173,7 @@ def _format_configure_chat_selector(chats: tuple[BotAvailableChat, ...]) -> str:
         [
             "",
             "Подсказки:",
-            "- `/configure <source_chat_id>` без опций покажет существующий config или создаст новый с дефолтами.",
+            "- `/configure <source_chat_id>` без опций покажет текущую конфигурацию или создаст новую с дефолтами.",
             "- `/configure <source_chat_id> access=invite format=source_id media=off` сохранит указанные параметры.",
             "- Для полного списка используй `/chats`.",
         ],
@@ -816,23 +1192,25 @@ def _format_progress_hints(progress_hints: tuple[BotProgressHint, ...]) -> str:
 
 
 def _format_telegram_status_result(result: TelegramSessionStatusResult) -> str:
+    if not result.connected:
+        return "Учетная запись Telegram не подключена. Используйте /connect или главное меню."
     return (
-        f"connected={'yes' if result.connected else 'no'}\n"
-        f"source={result.source}\n"
-        f"phone_number={result.phone_number or '-'}\n"
-        f"telegram_user_id={result.telegram_user_id or '-'}\n"
-        f"telegram_username={result.telegram_username or '-'}\n"
-        f"telegram_display_name={result.telegram_display_name or '-'}\n"
-        f"session_bound={'yes' if result.session_bound else 'no'}\n"
-        f"updated_at={result.updated_at or '-'}\n"
-        f"last_used_at={result.last_used_at or '-'}"
+        "Учетная запись Telegram подключена.\n"
+        f"Источник: {result.source}\n"
+        f"Номер телефона: {result.phone_number or '-'}\n"
+        f"Telegram user id: {result.telegram_user_id or '-'}\n"
+        f"Telegram username: {('@' + result.telegram_username) if result.telegram_username else '-'}\n"
+        f"Имя в Telegram: {result.telegram_display_name or '-'}\n"
+        f"Сессия привязана: {'да' if result.session_bound else 'нет'}\n"
+        f"Обновлено: {result.updated_at or '-'}\n"
+        f"Последнее использование: {result.last_used_at or '-'}"
     )
 
 
 def _format_telegram_disconnect_result(result: TelegramDisconnectResult) -> str:
     if result.disconnected:
-        return "Telegram session disconnected."
-    return "Привязанная Telegram session не найдена."
+        return "Вы вышли из учетной записи Telegram."
+    return "Привязанная учетная запись Telegram не найдена."
 
 
 def _format_active_jobs(active_jobs: tuple[BotActiveJob, ...]) -> str:
@@ -840,18 +1218,18 @@ def _format_active_jobs(active_jobs: tuple[BotActiveJob, ...]) -> str:
     for job in active_jobs:
         started_at = job.started_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         lines.append(
-            f"- {job.job_key} | operation={job.operation} | started_at={started_at} | chats={','.join(job.source_chat_ids)}"
+            f"- {job.operation} | job={job.job_key} | started_at={started_at} | chats={','.join(job.source_chat_ids)}"
         )
     return "\n".join(lines)
 
 
 def _format_chat_checkpoints(checkpoints: tuple[BotChatCheckpointStatus, ...]) -> str:
-    lines = ["Checkpoints:"]
+    lines = ["Точки прогресса:"]
     for checkpoint in checkpoints:
         lines.append(
             f"- {checkpoint.source_chat_id}: "
-            f"backfill={checkpoint.backfill_last_source_message_id or '-'} "
-            f"delta={checkpoint.delta_last_source_message_id or '-'}"
+            f"backfill {checkpoint.backfill_last_source_message_id or '-'}, "
+            f"delta {checkpoint.delta_last_source_message_id or '-'}"
         )
     return "\n".join(lines)
 
@@ -859,6 +1237,8 @@ def _format_chat_checkpoints(checkpoints: tuple[BotChatCheckpointStatus, ...]) -
 def _help_text() -> str:
     return (
         "Команды:\n"
+        "/start\n"
+        "/menu\n"
         "/connect [PHONE]\n"
         "/account\n"
         "/disconnect\n"
@@ -879,7 +1259,7 @@ def _help_text() -> str:
         "- /configure без аргументов покажет доступные source_chat_id.\n"
         "- /configure <source_chat_id> без опций покажет текущую конфигурацию, а если ее еще нет — создаст с дефолтами.\n"
         "- /add_users откроет отдельный flow добавления пользователей в уже мигрированный target chat через Excel-матрицу.\n"
-        "- /import_archive откроет отдельный flow: загрузи Telegram export (.json/.zip/.rar), бот создаст чат, сделает инициатора админом и перенесет только текстовые сообщения без участников и без вложений.\n"
+        "- /import_archive откроет отдельный flow: загрузи Telegram export (.json/.zip/.rar), бот подготовит импорт, отправит шаблон identity matrix, при необходимости спросит про перенос участников, затем запустит миграцию; вложения доступны для `.zip/.rar` bundle, plain `.json` импортируется без вложений.\n"
         "- /migrate и /remigrate продолжают перенос с текущего безопасного смещения.\n"
         "- /cancel без аргументов останавливает wizard и запрашивает отмену всех ваших активных фоновых задач; /cancel <source_chat_id> отменяет только задачи по одному чату.\n"
         "- Если для чата нужны дополнительные шаги по участникам или доступу, бот сам запросит их в диалоге."

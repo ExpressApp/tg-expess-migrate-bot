@@ -9,7 +9,7 @@ import pytest
 from telethon.tl.functions.messages import SearchRequest
 
 from extg_shared.contracts.manifest import MigrationManifest
-from extg_shared.contracts.models import CanonicalAttachment, SourceDialog
+from extg_shared.contracts.models import CanonicalAttachment, ContentType, SourceDialog
 from extg_telethon_service.infrastructure.telegram.fake_gateway import (
     FakeTelegramGateway,
 )
@@ -444,6 +444,56 @@ async def test_telethon_gateway_fetch_history_sanitizes_binary_raw_payload() -> 
         "__type__": "bytes",
         "length": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_telethon_gateway_fetch_history_marks_video_note_messages_separately() -> None:
+    dialog = _telethon_dialog(101, "Alpha Project")
+    message = SimpleNamespace(
+        id=2,
+        date=datetime(2026, 3, 25, 12, 5, tzinfo=UTC),
+        message=None,
+        reply_to_msg_id=None,
+        reply_to=None,
+        reply_to_top_id=None,
+        edit_date=None,
+        sticker=None,
+        photo=None,
+        voice=None,
+        video_note=SimpleNamespace(round=True),
+        video=None,
+        audio=None,
+        document=None,
+        poll=None,
+        action=None,
+        file=SimpleNamespace(
+            id=987,
+            name="round.mp4",
+            mime_type="video/mp4",
+            size=42,
+            duration=8,
+        ),
+        entities=[],
+        sender=None,
+        sender_id=42,
+        post_author=None,
+        to_dict=lambda: {"_": "Message"},
+    )
+    client = StubHistoryClient([dialog], [message])
+    gateway = TelethonTelegramGateway(
+        api_id=None,
+        api_hash=None,
+        session_string=None,
+        client=client,
+    )
+
+    batch = await gateway.fetch_history("101", cursor=None, limit=10)
+
+    assert len(batch.messages) == 1
+    assert batch.messages[0].content_type is ContentType.VIDEO_NOTE
+    assert batch.messages[0].body is None
+    assert batch.messages[0].attachments[0].media_kind == "video_note"
+    assert batch.messages[0].attachments[0].duration_seconds == 8
 
 
 @pytest.mark.asyncio

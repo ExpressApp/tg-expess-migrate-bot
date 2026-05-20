@@ -803,10 +803,84 @@ async def test_channel_chat_dispatches_invite_links_when_invite_strategy_selecte
     assert created_chat is not None
     assert created_chat.kind == "channel"
     assert created_chat.participant_huids == ["initiator-huid"]
+    assert mapping.member_success_count == 1
+    assert mapping.member_total_count == 1
     assert personal_chat is not None
     assert len(personal_messages) == 1
     assert "Imported Channel" in personal_messages[0].body
     assert "https://express.example/chat/" in personal_messages[0].body
+
+
+@pytest.mark.asyncio
+async def test_channel_chat_with_none_access_strategy_creates_target_without_member_dispatch():
+    identity_repo = InMemoryIdentityMappingRepository()
+    await identity_repo.save(
+        IdentityMappingRecord(
+            telegram_user_id="user-1",
+            telegram_username="alice",
+            telegram_display_name="Alice",
+            corporate_email="alice@example.com",
+        ),
+    )
+    telegram_gateway = FakeTelegramGateway(
+        dialogs=[SourceDialog(dialog_id="-100333", chat_type="channel", title="Announcements")],
+        messages_by_dialog={},
+        participants_by_dialog={
+            "-100333": [
+                SourceParticipant(
+                    external_id="user-1",
+                    username="alice",
+                    display_name="Alice",
+                ),
+            ],
+        },
+        channel_access_profiles_by_dialog={
+            "-100333": SourceChannelAccessProfile(
+                dialog_id="-100333",
+                is_admin=True,
+                can_list_participants=True,
+            ),
+        },
+    )
+    express_gateway = FakeExpressGateway(
+        user_huid_by_email={"alice@example.com": "alice-huid"},
+    )
+    service = TargetChatProvisioningService(
+        telegram_gateway=telegram_gateway,
+        express_gateway=express_gateway,
+        chat_mapping_repository=InMemoryChatMappingRepository(),
+        identity_directory=UsernameEmailIdentityDirectory(
+            identity_mapping_repository=identity_repo,
+            express_gateway=express_gateway,
+        ),
+        audit_repository=InMemoryAuditRepository(),
+        retry_policy=AsyncRetryPolicy(
+            max_attempts=1,
+            base_delay_seconds=0,
+            max_delay_seconds=0,
+            jitter_seconds=0,
+        ),
+    )
+
+    mapping = await service.ensure_target_chat(
+        migration_id="migration-bot",
+        dialog=ManifestDialog(
+            source_chat_id="-100333",
+            source_chat_type="channel",
+            target_strategy="create",
+            target_title="Imported Channel",
+            initiator_huid="initiator-huid",
+            access_strategy="none",
+        ),
+    )
+
+    created_chat = express_gateway.created_chat(mapping.target_chat_id)
+    assert created_chat is not None
+    assert created_chat.kind == "channel"
+    assert created_chat.participant_huids == ["initiator-huid"]
+    assert mapping.member_success_count is None
+    assert mapping.member_total_count is None
+    assert express_gateway.messages_for_chat("personal-chat-alice-huid") == []
 
 
 @pytest.mark.asyncio

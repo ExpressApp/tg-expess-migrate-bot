@@ -929,6 +929,8 @@ class TelethonTelegramGateway:
             return ContentType.PHOTO
         if getattr(message, "voice", None):
             return ContentType.VOICE
+        if getattr(message, "video_note", None):
+            return ContentType.VIDEO_NOTE
         if getattr(message, "video", None):
             return ContentType.VIDEO
         if getattr(message, "audio", None):

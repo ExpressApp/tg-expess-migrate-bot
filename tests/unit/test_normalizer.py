@@ -123,3 +123,25 @@ async def test_normalizer_marks_unsupported_archive_media_with_specific_kind():
     normalized = await normalizer.normalize(message)
 
     assert normalized.body_plain == "[unsupported: video_message]"
+
+
+@pytest.mark.asyncio
+async def test_normalizer_renders_video_note_placeholder():
+    normalizer = TelegramMessageNormalizer(DisplayOnlyIdentityResolver())
+
+    message = TelegramSourceMessage(
+        chat_id="chat-1",
+        message_id="4",
+        sent_at_utc=datetime(2026, 3, 19, 10, 15, tzinfo=UTC),
+        author=TelegramAuthor(
+            external_id="100",
+            display_name="Peer User",
+            username="peer.user",
+        ),
+        body=None,
+        content_type=ContentType.VIDEO_NOTE,
+    )
+
+    normalized = await normalizer.normalize(message)
+
+    assert normalized.body_plain == "[video_note]"

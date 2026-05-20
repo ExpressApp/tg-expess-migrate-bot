@@ -34,6 +34,7 @@ from extg_shared.contracts.models import (
     MessageImportStatus,
     MessageMappingRecord,
     MigrationCheckpoint,
+    OperatorMigrationDefaultsRecord,
     OperatorTelegramSessionRecord,
     PublishedIntegrationEvent,
     ServiceWatermarkRecord,
@@ -76,6 +77,19 @@ class InMemoryChatMappingRepository:
     async def save(self, record: ChatMappingRecord) -> None:
         async with self._lock:
             self._items[(record.migration_id, record.source_chat_id)] = record
+
+    async def list_by_migration(
+        self,
+        migration_id: str,
+    ) -> list[ChatMappingRecord]:
+        async with self._lock:
+            records = [
+                record
+                for (current_migration_id, _), record in self._items.items()
+                if current_migration_id == migration_id
+            ]
+            records.sort(key=lambda item: item.source_chat_id)
+            return records
 
 
 class InMemoryChatMigrationConfigRepository:
@@ -124,7 +138,10 @@ class InMemoryChatMigrationConfigRepository:
                 include_from=record.include_from,
                 include_to=record.include_to,
                 migrate_media=record.migrate_media,
+                media_kinds=record.media_kinds,
+                service_messages=record.service_messages,
                 reply_mode=record.reply_mode,
+                output_template=record.output_template,
                 identity_policy=record.identity_policy,
                 updated_by_huid=record.updated_by_huid,
                 created_at=existing.created_at if existing is not None else record.created_at,
@@ -151,6 +168,34 @@ class InMemoryChatMigrationConfigRepository:
         key = (migration_id, source_chat_id)
         async with self._lock:
             return self._items.pop(key, None) is not None
+
+
+class InMemoryOperatorMigrationDefaultsRepository:
+    def __init__(self) -> None:
+        self._items: dict[tuple[str, str], OperatorMigrationDefaultsRecord] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(
+        self,
+        migration_id: str,
+        operator_huid: str,
+    ) -> OperatorMigrationDefaultsRecord | None:
+        async with self._lock:
+            return self._items.get((migration_id, operator_huid))
+
+    async def save(
+        self,
+        record: OperatorMigrationDefaultsRecord,
+    ) -> OperatorMigrationDefaultsRecord:
+        key = (record.migration_id, record.operator_huid)
+        async with self._lock:
+            existing = self._items.get(key)
+            updated = replace(
+                record,
+                created_at=existing.created_at if existing is not None else record.created_at,
+            )
+            self._items[key] = updated
+            return updated
 
 class InMemoryMigrationJobRepository:
     def __init__(

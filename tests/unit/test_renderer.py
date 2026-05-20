@@ -69,3 +69,32 @@ def test_renderer_renders_skipped_attachment_notice():
         "[attachment skipped: file exceeds eXpress BotX upload limit "
         "(120.0 MiB > 100.0 MiB)]"
     ) in rendered.display_body
+
+
+def test_renderer_renders_custom_output_template():
+    renderer = MessageRenderer(timezone_name="Europe/Moscow")
+    rendered = renderer.render(
+        build_message(
+            attachment_failures=[],
+            edited_at_utc=None,
+        ),
+        source_chat_title="Project X",
+        reply_preview=ReplyPreview(
+            sent_at_utc=datetime(2026, 3, 17, 11, 31, 2, tzinfo=UTC),
+            author_display_name="Петр Иванов",
+            excerpt="Цитата исходного сообщения...",
+        ),
+        reply_mode="source_id",
+        output_template=(
+            '{"author":"{{author}}","chat":"{{source_chat_title}}",'
+            '"reply":"{{reply_block}}","body":"{{body}}"}'
+        ),
+    )
+
+    assert rendered.display_header == ""
+    assert rendered.footer is None
+    assert rendered.display_body == (
+        '{"author":"Иван Петров","chat":"Project X",'
+        '"reply":"↪ Reply to source message #msg-1",'
+        '"body":"Текущий текст сообщения"}'
+    )

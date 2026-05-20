@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import AsyncIterator
+from urllib.parse import parse_qs, urlparse
 
 from extg_migration_runtime.infrastructure.archive.telegram_export_archive_parser import (
     TelegramExportArchiveParser,
@@ -121,8 +122,14 @@ class TelegramExportSnapshotGateway:
         *,
         source_backend: str = "telegram_export_archive",
     ) -> DownloadedAttachment:
-        raise FatalItemError(
-            "Telegram export archive import does not support attachment download",
+        locator = self._parse_attachment_locator(attachment.download_url)
+        snapshot = await self._require_snapshot(locator["source_chat_id"])
+        archive_content = await self._stage_store.read(snapshot.archive_locator)
+        return await self._parser.download_attachment(
+            original_filename=snapshot.original_filename,
+            archive_content=archive_content,
+            attachment=attachment,
+            member_path=locator["member_path"],
         )
 
     async def list_participants(
@@ -210,6 +217,28 @@ class TelegramExportSnapshotGateway:
             approximate_bytes=snapshot.approximate_bytes,
             has_topics=False,
         )
+
+    def _parse_attachment_locator(self, download_url: str | None) -> dict[str, str]:
+        if not download_url:
+            raise FatalItemError(
+                "attachment.download_url is required for Telegram export attachment download",
+            )
+        parsed = urlparse(download_url)
+        if parsed.scheme != "tg-export" or parsed.netloc != "attachment":
+            raise FatalItemError(
+                f"unsupported attachment download scheme: {parsed.scheme}",
+            )
+        query = parse_qs(parsed.query)
+        source_chat_id = next(iter(query.get("chat_id", [])), "").strip()
+        member_path = next(iter(query.get("path", [])), "").strip()
+        if not source_chat_id or not member_path:
+            raise FatalItemError(
+                f"invalid Telegram export attachment locator: {download_url}",
+            )
+        return {
+            "source_chat_id": source_chat_id,
+            "member_path": member_path,
+        }
 
 
 class MultiSourceTelegramGateway:

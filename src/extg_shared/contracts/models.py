@@ -11,6 +11,7 @@ class ContentType(str, Enum):
     PHOTO = "photo"
     DOCUMENT = "document"
     VIDEO = "video"
+    VIDEO_NOTE = "video_note"
     AUDIO = "audio"
     VOICE = "voice"
     STICKER = "sticker"
@@ -340,6 +341,8 @@ class ChatMappingRecord:
     updated_at: datetime
     anchor_cts_host: str | None = None
     anchor_bot_id: str | None = None
+    member_success_count: int | None = None
+    member_total_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +372,34 @@ class ChatMigrationConfigRecord:
     source_thread_id: str | None = None
     source_thread_title: str | None = None
     skip_in_all: bool = False
+    service_messages: bool = True
+    media_kinds: tuple[str, ...] | None = None
+    output_template: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.include_from is not None
+            and self.include_to is not None
+            and self.include_from > self.include_to
+        ):
+            raise ValueError("include_from must be less than or equal to include_to")
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorMigrationDefaultsRecord:
+    migration_id: str
+    operator_huid: str
+    include_from: datetime | None
+    include_to: datetime | None
+    migrate_media: bool
+    media_kinds: tuple[str, ...] | None
+    service_messages: bool
+    reply_mode: str
+    access_strategy: str
+    topic_strategy: str
+    created_at: datetime
+    updated_at: datetime
+    output_template: str | None = None
 
     def __post_init__(self) -> None:
         if (

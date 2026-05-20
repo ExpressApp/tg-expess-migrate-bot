@@ -18,6 +18,7 @@ from extg_shared.contracts.ports import (
     MigrationJobRepository,
     MessageMappingRepository,
     MessageStatusSummary,
+    OperatorMigrationDefaultsRepository,
     OperatorTelegramSessionRepository,
     TelegramExportArchiveStageStore,
     TelegramExportSnapshotRepository,
@@ -73,6 +74,7 @@ from extg_shared.contracts.manifest import (
     ManifestDialog,
     MigrationManifest,
 )
+from extg_shared.contracts.output_template import validate_output_template
 from extg_shared.contracts.models import (
     AuditEvent,
     AuditSeverity,
@@ -86,6 +88,7 @@ from extg_shared.contracts.models import (
     MIGRATION_JOB_CANCEL_REQUESTED_ERROR_CODE,
     MessageImportStatus,
     MigrationLifecycleStatus,
+    OperatorMigrationDefaultsRecord,
     SourceDialog,
 )
 from extg_shared.utils import (
@@ -132,7 +135,10 @@ class MigrationRunOptions:
     include_from: str | None = None
     include_to: str | None = None
     migrate_media: bool | None = None
+    media_kinds: tuple[str, ...] | None = None
+    service_messages: bool | None = None
     reply_mode: str | None = None
+    output_template: str | None = None
     source_backend: str | None = None
     target_strategy: str | None = None
     target_title: str | None = None
@@ -141,6 +147,7 @@ class MigrationRunOptions:
     access_strategy: str | None = None
     topic_strategy: str | None = None
     skip_in_all: bool | None = None
+    excluded_source_chat_ids: tuple[str, ...] = ()
     progress_policy: str = "resume"
     batch_size: int | None = None
 
@@ -191,6 +198,7 @@ class BotChatConfigurationResult:
     include_to: str | None
     migrate_media: bool
     reply_mode: str
+    output_template: str | None
     identity_policy: str
     access_strategy: str
     topic_strategy: str
@@ -199,7 +207,26 @@ class BotChatConfigurationResult:
     source_thread_id: str | None
     source_thread_title: str | None
     configured_via: str
+    service_messages: bool = True
+    media_kinds: tuple[str, ...] | None = None
     progress_hint: BotProgressHint | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BotOperatorDefaultsResult:
+    migration_id: str
+    include_from: str | None
+    include_to: str | None
+    migrate_media: bool
+    media_kinds: tuple[str, ...] | None
+    service_messages: bool
+    reply_mode: str
+    output_template: str | None
+    access_strategy: str
+    topic_strategy: str
+    configured_via: str
+    base_reply_mode: str = "inline_quote"
+    base_output_template: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +281,18 @@ class BotGroupIdentityImportResult:
     source_chat_id: str
     imported_count: int
     skipped_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class BotArchiveImportPreparedResult:
+    source_chat_id: str
+    source_chat_type: str
+    source_chat_title: str
+    message_count: int
+    media_count: int
+    approximate_bytes: int
+    workbook_content: bytes
+    workbook_filename: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +403,26 @@ class BotChatCheckpointStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class BotMainStatusChat:
+    source_chat_id: str
+    source_chat_type: str
+    source_chat_title: str
+    source_message_count: int | None
+    imported_count: int
+    updated_at: datetime | None
+    is_running: bool = False
+    member_success_count: int | None = None
+    member_total_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BotMainStatusResult:
+    migration_id: str
+    active_chats: tuple[BotMainStatusChat, ...]
+    completed_chats: tuple[BotMainStatusChat, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class MigrationBotStatusResult:
     migration_id: str
     migration_state: MigrationLifecycleStatus | None
@@ -455,6 +514,7 @@ class MigrationBotControlService:
         audit_repository: AuditRepository,
         migration_job_repository: MigrationJobRepository,
         logger: Any,
+        operator_migration_defaults_repository: OperatorMigrationDefaultsRepository | None = None,
     ) -> None:
         self._settings = settings
         self._telegram_gateway = telegram_gateway
@@ -483,6 +543,7 @@ class MigrationBotControlService:
         self._audit_repository = audit_repository
         self._migration_job_repository = migration_job_repository
         self._logger = logger
+        self._operator_migration_defaults_repository = operator_migration_defaults_repository
         self._identity_matrix_workbook_service = IdentityMatrixWorkbookService()
 
     async def list_available_chats(
@@ -602,6 +663,88 @@ class MigrationBotControlService:
             source_chat_id=source_chat_id,
             options=MigrationRunOptions(),
         )
+
+    async def show_operator_defaults(
+        self,
+        *,
+        operator: BotOperatorContext,
+    ) -> BotOperatorDefaultsResult:
+        await self._authorize(operator)
+        return await self._operator_defaults_result(operator.huid)
+
+    async def configure_operator_defaults(
+        self,
+        *,
+        operator: BotOperatorContext,
+        options: MigrationRunOptions,
+    ) -> BotOperatorDefaultsResult:
+        await self._authorize(operator)
+        record, _ = await self._load_effective_operator_defaults(operator.huid)
+        updated = OperatorMigrationDefaultsRecord(
+            migration_id=record.migration_id,
+            operator_huid=record.operator_huid,
+            include_from=self._parse_datetime_or_none(options.include_from, record.include_from),
+            include_to=self._parse_datetime_or_none(options.include_to, record.include_to),
+            migrate_media=(
+                options.migrate_media
+                if options.migrate_media is not None
+                else record.migrate_media
+            ),
+            media_kinds=(
+                options.media_kinds
+                if options.media_kinds is not None
+                else record.media_kinds
+            ),
+            service_messages=(
+                options.service_messages
+                if options.service_messages is not None
+                else record.service_messages
+            ),
+            reply_mode=(
+                options.reply_mode.strip().lower()
+                if options.reply_mode is not None and options.reply_mode.strip()
+                else record.reply_mode
+            ),
+            output_template=(
+                validate_output_template(options.output_template)
+                if options.output_template is not None
+                else record.output_template
+            ),
+            access_strategy=(
+                options.access_strategy.strip().lower()
+                if options.access_strategy is not None and options.access_strategy.strip()
+                else record.access_strategy
+            ),
+            topic_strategy=(
+                options.topic_strategy.strip().lower()
+                if options.topic_strategy is not None and options.topic_strategy.strip()
+                else record.topic_strategy
+            ),
+            created_at=record.created_at,
+            updated_at=self._now(),
+        )
+        saved = updated
+        configured_via = "bot"
+        if self._operator_migration_defaults_repository is not None:
+            saved = await self._operator_migration_defaults_repository.save(updated)
+            configured_via = "db"
+        await self._audit_operator_event(
+            self._migration_id_for_tracking(),
+            operator,
+            event_type="bot_operator_defaults_updated",
+            payload={
+                "include_from": self._format_datetime(saved.include_from),
+                "include_to": self._format_datetime(saved.include_to),
+                "migrate_media": saved.migrate_media,
+                "media_kinds": list(saved.media_kinds) if saved.media_kinds is not None else None,
+                "service_messages": saved.service_messages,
+                "reply_mode": saved.reply_mode,
+                "output_template": saved.output_template,
+                "access_strategy": saved.access_strategy,
+                "topic_strategy": saved.topic_strategy,
+            },
+        )
+        return self._operator_defaults_result_from_record(saved, configured_via=configured_via)
 
     async def list_chat_users(
         self,
@@ -938,20 +1081,21 @@ class MigrationBotControlService:
             runner=run,
         )
 
-    async def start_archive_import(
+    async def prepare_archive_import(
         self,
         *,
         operator: BotOperatorContext,
         archive_content: bytes,
         archive_filename: str | None,
-    ) -> BotOperationAcceptedResult:
+    ) -> BotArchiveImportPreparedResult:
         await self._authorize(operator)
 
-        async def run() -> BotOperationAcceptedResult:
+        async def run() -> BotArchiveImportPreparedResult:
             parsed = await self._telegram_export_archive_parser.parse_upload(
                 filename=archive_filename,
                 content=archive_content,
             )
+            operator_defaults, _ = await self._load_effective_operator_defaults(operator.huid)
             migration_id = self._require_configured_migration_id()
             existing = await self._chat_migration_config_repository.get(
                 migration_id,
@@ -978,10 +1122,22 @@ class MigrationBotControlService:
                 source_backend="telegram_export_archive",
                 target_strategy="create",
                 target_title=parsed.source_chat_title,
-                migrate_media=False,
-                reply_mode=self._manifest_defaults().reply_mode,
+                include_from=self._format_datetime(operator_defaults.include_from),
+                include_to=self._format_datetime(operator_defaults.include_to),
+                migrate_media=(
+                    operator_defaults.migrate_media
+                    and parsed.media_count > 0
+                    and self._telegram_export_archive_parser.supports_embedded_attachments(
+                        archive_filename,
+                    )
+                ),
+                media_kinds=operator_defaults.media_kinds,
+                service_messages=operator_defaults.service_messages,
+                reply_mode=operator_defaults.reply_mode,
+                output_template=operator_defaults.output_template,
                 identity_policy="display_only",
-                access_strategy="direct_add",
+                access_strategy="none",
+                topic_strategy=operator_defaults.topic_strategy,
                 skip_in_all=True,
                 progress_policy="resume",
             )
@@ -1016,8 +1172,120 @@ class MigrationBotControlService:
                     "export_chat_id": parsed.export_chat_id,
                 },
             )
+            workbook_content = self._identity_matrix_workbook_service.build_workbook(
+                rows=[],
+                manual_template_rows=3,
+            )
+            return BotArchiveImportPreparedResult(
+                source_chat_id=saved.source_chat_id,
+                source_chat_type=saved.source_chat_type,
+                source_chat_title=saved.source_chat_title,
+                message_count=parsed.message_count,
+                media_count=parsed.media_count,
+                approximate_bytes=parsed.approximate_bytes,
+                workbook_content=workbook_content,
+                workbook_filename="identity_matrix.xlsx",
+            )
+
+        return await self._execute_for_source_backends(
+            operator=operator,
+            source_backends={"telegram_export_archive"},
+            runner=run,
+        )
+
+    async def apply_archive_identity_matrix(
+        self,
+        *,
+        operator: BotOperatorContext,
+        source_chat_id: str,
+        workbook_content: bytes,
+    ) -> BotGroupIdentityImportResult:
+        await self._authorize(operator)
+        imported_count, skipped_count = await self._apply_identity_matrix_workbook(
+            workbook_content=workbook_content,
+            default_ad_domain=operator.ad_domain,
+        )
+        await self._audit_operator_event(
+            self._migration_id_for_tracking(),
+            operator,
+            event_type="bot_archive_identity_matrix_imported",
+            payload={
+                "source_chat_id": source_chat_id,
+                "imported_count": imported_count,
+                "skipped_count": skipped_count,
+            },
+        )
+        return BotGroupIdentityImportResult(
+            source_chat_id=source_chat_id,
+            imported_count=imported_count,
+            skipped_count=skipped_count,
+        )
+
+    async def start_prepared_archive_import(
+        self,
+        *,
+        operator: BotOperatorContext,
+        source_chat_id: str,
+        migrate_members: bool,
+        identity_matrix_uploaded: bool,
+    ) -> BotOperationAcceptedResult:
+        await self._authorize(operator)
+
+        async def run() -> BotOperationAcceptedResult:
+            migration_id = self._require_configured_migration_id()
+            existing = await self._chat_migration_config_repository.get(
+                migration_id,
+                source_chat_id,
+            )
+            if existing is None:
+                raise ConfigurationError(
+                    f"source_chat_id={source_chat_id!r} was not prepared for archive import",
+                )
+            self._ensure_operator_owns_chat_config(
+                record=existing,
+                operator_huid=operator.huid,
+            )
+            dialog = await self._discover_dialog(
+                source_chat_id,
+                source_backend="telegram_export_archive",
+            )
+            already_migrated = await self._completed_chat_already_migrated_result(
+                migration_id=migration_id,
+                dialog=dialog,
+                operator_huid=operator.huid,
+            )
+            if already_migrated is not None:
+                return replace(
+                    already_migrated,
+                    operation="import_archive_chat",
+                )
+            options = MigrationRunOptions(
+                source_backend="telegram_export_archive",
+                target_strategy=existing.target_strategy,
+                target_title=existing.target_title,
+                include_from=self._format_datetime(existing.include_from),
+                include_to=self._format_datetime(existing.include_to),
+                migrate_media=existing.migrate_media,
+                media_kinds=existing.media_kinds,
+                service_messages=existing.service_messages,
+                reply_mode=existing.reply_mode,
+                output_template=existing.output_template,
+                identity_policy=(
+                    "matrix_uploaded" if identity_matrix_uploaded else "display_only"
+                ),
+                access_strategy="direct_add" if migrate_members else "none",
+                topic_strategy=existing.topic_strategy,
+                skip_in_all=existing.skip_in_all,
+                progress_policy="resume",
+            )
+            await self._save_chat_config(
+                operator=operator,
+                dialog=dialog,
+                options=options,
+                existing=existing,
+            )
             manifest = await self._load_config_manifest(
-                source_chat_ids=(saved.source_chat_id,),
+                source_chat_ids=(source_chat_id,),
                 operator_huid=operator.huid,
             )
             await self._validate_manifest_preconditions(manifest)
@@ -1025,7 +1293,7 @@ class MigrationBotControlService:
                 operator=operator,
                 operation="import_archive_chat",
                 manifest=manifest,
-                source_chat_ids=(saved.source_chat_id,),
+                source_chat_ids=(source_chat_id,),
                 options=options,
             )
 
@@ -1033,6 +1301,25 @@ class MigrationBotControlService:
             operator=operator,
             source_backends={"telegram_export_archive"},
             runner=run,
+        )
+
+    async def start_archive_import(
+        self,
+        *,
+        operator: BotOperatorContext,
+        archive_content: bytes,
+        archive_filename: str | None,
+    ) -> BotOperationAcceptedResult:
+        prepared = await self.prepare_archive_import(
+            operator=operator,
+            archive_content=archive_content,
+            archive_filename=archive_filename,
+        )
+        return await self.start_prepared_archive_import(
+            operator=operator,
+            source_chat_id=prepared.source_chat_id,
+            migrate_members=False,
+            identity_matrix_uploaded=False,
         )
 
     async def map_identity(
@@ -1558,22 +1845,32 @@ class MigrationBotControlService:
                 operator=operator,
                 options=options,
             )
-            await self._validate_manifest_preconditions(manifest)
-            source_chat_ids = tuple(dialog.source_chat_id for dialog in manifest.dialogs)
+            excluded_source_chat_ids = frozenset(options.excluded_source_chat_ids)
+            selected_dialogs = [
+                dialog
+                for dialog in manifest.dialogs
+                if dialog.source_chat_id not in excluded_source_chat_ids
+            ]
+            filtered_manifest = manifest.model_copy(update={"dialogs": selected_dialogs})
+            await self._validate_manifest_preconditions(filtered_manifest)
+            source_chat_ids = tuple(dialog.source_chat_id for dialog in filtered_manifest.dialogs)
             if not source_chat_ids:
                 return BotOperationAcceptedResult(
                     status="blocked",
                     operation="migrate_all",
-                    migration_id=manifest.migration_id,
+                    migration_id=filtered_manifest.migration_id,
                     source_chat_ids=(),
-                    reason="no Telegram chats are configured or available for migration",
+                    reason=(
+                        "no Telegram chats remain after applying the current "
+                        "selection and exclusions"
+                    ),
                 )
-            await self._inventory_use_case.execute(InventoryCommand(manifest=manifest))
+            await self._inventory_use_case.execute(InventoryCommand(manifest=filtered_manifest))
             return await self._start_fan_out_background_operation(
                 operator=operator,
                 aggregate_operation="migrate_all",
                 job_operation="migrate_chat",
-                manifest=manifest,
+                manifest=filtered_manifest,
                 source_chat_ids=source_chat_ids,
                 options=options,
             )
@@ -1922,6 +2219,86 @@ class MigrationBotControlService:
             chat_checkpoints=tuple(checkpoints),
         )
 
+    async def main_status_overview(
+        self,
+        *,
+        operator: BotOperatorContext,
+    ) -> BotMainStatusResult:
+        await self._authorize(operator)
+        migration_id = self._require_configured_migration_id()
+        manifest = await self._load_runtime_manifest(
+            operator_huid=operator.huid,
+            require_configured=False,
+            include_skipped_in_all=True,
+        )
+        reconcile_result = await self._reconcile_migration_use_case.execute(
+            ReconcileMigrationCommand(
+                manifest=manifest,
+                source_chat_id=None,
+            ),
+        )
+        configs = [
+            record
+            for record in await self._chat_migration_config_repository.list_by_migration(
+                migration_id,
+            )
+            if record.updated_by_huid == operator.huid and not self._is_split_root_config(record)
+        ]
+        owned_chat_ids = {config.source_chat_id for config in configs}
+        mappings_by_chat = {
+            record.source_chat_id: record
+            for record in await self._chat_mapping_repository.list_by_migration(migration_id)
+            if record.source_chat_id in owned_chat_ids
+        }
+        reconcile_by_chat = {
+            chat.source_chat_id: chat
+            for chat in reconcile_result.chats
+        }
+        running_chat_ids = {
+            source_chat_id
+            for job in await self._list_active_jobs(
+                migration_id,
+                operator_huid=operator.huid,
+            )
+            for source_chat_id in job.source_chat_ids
+        }
+
+        active_chats: list[BotMainStatusChat] = []
+        completed_chats: list[BotMainStatusChat] = []
+        for config in configs:
+            mapping = mappings_by_chat.get(config.source_chat_id)
+            status_chat = self._build_main_status_chat(
+                config=config,
+                mapping=mapping,
+                reconcile_chat=reconcile_by_chat.get(config.source_chat_id),
+                is_running=config.source_chat_id in running_chat_ids,
+            )
+            if mapping is not None and mapping.status == "completed":
+                completed_chats.append(status_chat)
+                continue
+            active_chats.append(status_chat)
+
+        active_chats.sort(
+            key=lambda chat: (
+                not chat.is_running,
+                -(chat.updated_at.timestamp() if chat.updated_at is not None else 0.0),
+                chat.source_chat_title.lower(),
+                chat.source_chat_id,
+            ),
+        )
+        completed_chats.sort(
+            key=lambda chat: (
+                -(chat.updated_at.timestamp() if chat.updated_at is not None else 0.0),
+                chat.source_chat_title.lower(),
+                chat.source_chat_id,
+            ),
+        )
+        return BotMainStatusResult(
+            migration_id=migration_id,
+            active_chats=tuple(active_chats),
+            completed_chats=tuple(completed_chats),
+        )
+
     async def stats(
         self,
         *,
@@ -1989,6 +2366,48 @@ class MigrationBotControlService:
             ambiguous_messages=status_result.reconcile.ambiguous_count,
             imported_attachments=status_result.reconcile.attachment_imported_count,
             failed_attachments=status_result.reconcile.attachment_failed_count,
+        )
+
+    def _build_main_status_chat(
+        self,
+        *,
+        config: ChatMigrationConfigRecord,
+        mapping: ChatMappingRecord | None,
+        reconcile_chat: Any | None,
+        is_running: bool,
+    ) -> BotMainStatusChat:
+        source_message_count = (
+            reconcile_chat.source_message_count
+            if reconcile_chat is not None
+            else None
+        )
+        imported_count = (
+            reconcile_chat.imported_count
+            if reconcile_chat is not None
+            else 0
+        )
+        return BotMainStatusChat(
+            source_chat_id=config.source_chat_id,
+            source_chat_type=config.source_chat_type,
+            source_chat_title=config.source_chat_title,
+            source_message_count=source_message_count,
+            imported_count=imported_count,
+            updated_at=(
+                mapping.updated_at
+                if mapping is not None
+                else config.updated_at
+            ),
+            is_running=is_running,
+            member_success_count=(
+                mapping.member_success_count
+                if mapping is not None
+                else None
+            ),
+            member_total_count=(
+                mapping.member_total_count
+                if mapping is not None
+                else None
+            ),
         )
 
     async def cancel_active_jobs(
@@ -2299,18 +2718,21 @@ class MigrationBotControlService:
             manifest.migration_id,
             operator,
             event_type="bot_migration_job_accepted",
-            payload={
-                "operation": operation,
-                "job_key": job_key,
-                "source_chat_ids": source_chat_ids,
-                "options": {
-                    "include_from": options.include_from,
-                    "include_to": options.include_to,
-                    "migrate_media": options.migrate_media,
-                    "reply_mode": options.reply_mode,
-                    "progress_policy": options.progress_policy,
-                    "batch_size": options.batch_size,
-                },
+                payload={
+                    "operation": operation,
+                    "job_key": job_key,
+                    "source_chat_ids": source_chat_ids,
+                    "options": {
+                        "include_from": options.include_from,
+                        "include_to": options.include_to,
+                        "migrate_media": options.migrate_media,
+                        "media_kinds": list(options.media_kinds) if options.media_kinds else None,
+                        "service_messages": options.service_messages,
+                        "reply_mode": options.reply_mode,
+                        "excluded_source_chat_ids": list(options.excluded_source_chat_ids),
+                        "progress_policy": options.progress_policy,
+                        "batch_size": options.batch_size,
+                    },
             },
         )
 
@@ -2453,7 +2875,10 @@ class MigrationBotControlService:
                     "include_from": options.include_from,
                     "include_to": options.include_to,
                     "migrate_media": options.migrate_media,
+                    "media_kinds": list(options.media_kinds) if options.media_kinds else None,
+                    "service_messages": options.service_messages,
                     "reply_mode": options.reply_mode,
+                    "excluded_source_chat_ids": list(options.excluded_source_chat_ids),
                     "progress_policy": options.progress_policy,
                     "batch_size": options.batch_size,
                 },
@@ -3339,6 +3764,24 @@ class MigrationBotControlService:
                     else defaults.migrate_media
                 )
             ),
+            media_kinds=(
+                options.media_kinds
+                if options.media_kinds is not None
+                else (
+                    existing.media_kinds
+                    if existing is not None
+                    else defaults.media_kinds
+                )
+            ),
+            service_messages=(
+                options.service_messages
+                if options.service_messages is not None
+                else (
+                    existing.service_messages
+                    if existing is not None
+                    else defaults.service_messages
+                )
+            ),
             reply_mode=(
                 options.reply_mode
                 if options.reply_mode is not None
@@ -3346,6 +3789,15 @@ class MigrationBotControlService:
                     existing.reply_mode
                     if existing is not None
                     else defaults.reply_mode
+                )
+            ),
+            output_template=(
+                validate_output_template(options.output_template)
+                if options.output_template is not None
+                else (
+                    existing.output_template
+                    if existing is not None
+                    else defaults.output_template
                 )
             ),
             identity_policy=(
@@ -3476,6 +3928,7 @@ class MigrationBotControlService:
             include_to=self._format_datetime(record.include_to),
             migrate_media=record.migrate_media,
             reply_mode=record.reply_mode,
+            output_template=record.output_template,
             identity_policy=record.identity_policy,
             access_strategy=record.access_strategy,
             topic_strategy=record.topic_strategy,
@@ -3484,7 +3937,74 @@ class MigrationBotControlService:
             source_thread_id=record.source_thread_id,
             source_thread_title=record.source_thread_title,
             configured_via="db",
+            service_messages=record.service_messages,
+            media_kinds=record.media_kinds,
             progress_hint=progress_hint,
+        )
+
+    async def _load_effective_operator_defaults(
+        self,
+        operator_huid: str,
+    ) -> tuple[OperatorMigrationDefaultsRecord, str]:
+        if self._operator_migration_defaults_repository is None:
+            return self._fallback_operator_defaults_record(operator_huid), "bot"
+        record = await self._operator_migration_defaults_repository.get(
+            self._require_configured_migration_id(),
+            operator_huid,
+        )
+        if record is None:
+            return self._fallback_operator_defaults_record(operator_huid), "bot"
+        return record, "db"
+
+    async def _operator_defaults_result(
+        self,
+        operator_huid: str,
+    ) -> BotOperatorDefaultsResult:
+        record, configured_via = await self._load_effective_operator_defaults(operator_huid)
+        return self._operator_defaults_result_from_record(record, configured_via=configured_via)
+
+    def _fallback_operator_defaults_record(
+        self,
+        operator_huid: str,
+    ) -> OperatorMigrationDefaultsRecord:
+        defaults = self._manifest_defaults()
+        now = self._now()
+        return OperatorMigrationDefaultsRecord(
+            migration_id=self._require_configured_migration_id(),
+            operator_huid=operator_huid,
+            include_from=None,
+            include_to=None,
+            migrate_media=defaults.migrate_media,
+            media_kinds=defaults.media_kinds,
+            service_messages=defaults.service_messages,
+            reply_mode=defaults.reply_mode,
+            output_template=defaults.output_template,
+            access_strategy=defaults.access_strategy,
+            topic_strategy="single_chat",
+            created_at=now,
+            updated_at=now,
+        )
+
+    def _operator_defaults_result_from_record(
+        self,
+        record: OperatorMigrationDefaultsRecord,
+        *,
+        configured_via: str,
+    ) -> BotOperatorDefaultsResult:
+        return BotOperatorDefaultsResult(
+            migration_id=record.migration_id,
+            include_from=self._format_datetime(record.include_from),
+            include_to=self._format_datetime(record.include_to),
+            migrate_media=record.migrate_media,
+            media_kinds=record.media_kinds,
+            service_messages=record.service_messages,
+            reply_mode=record.reply_mode,
+            output_template=record.output_template,
+            access_strategy=record.access_strategy,
+            topic_strategy=record.topic_strategy,
+            configured_via=configured_via,
+            base_reply_mode=self._manifest_defaults().reply_mode,
+            base_output_template=self._manifest_defaults().output_template,
         )
 
     def _manifest_dialog_from_config(
@@ -3509,7 +4029,10 @@ class MigrationBotControlService:
             include_from=self._format_datetime(record.include_from),
             include_to=self._format_datetime(record.include_to),
             migrate_media=record.migrate_media,
+            media_kinds=record.media_kinds,
+            service_messages=record.service_messages,
             reply_mode=record.reply_mode,
+            output_template=record.output_template,
             identity_policy=record.identity_policy,
             access_strategy=record.access_strategy,
             topic_strategy=record.topic_strategy,
@@ -3736,10 +4259,25 @@ class MigrationBotControlService:
                         if options.migrate_media is not None
                         else dialog.migrate_media
                     ),
+                    "media_kinds": (
+                        options.media_kinds
+                        if options.media_kinds is not None
+                        else dialog.media_kinds
+                    ),
+                    "service_messages": (
+                        options.service_messages
+                        if options.service_messages is not None
+                        else dialog.service_messages
+                    ),
                     "reply_mode": (
                         options.reply_mode
                         if options.reply_mode is not None
                         else dialog.reply_mode
+                    ),
+                    "output_template": (
+                        validate_output_template(options.output_template)
+                        if options.output_template is not None
+                        else dialog.output_template
                     ),
                     "target_strategy": (
                         options.target_strategy
@@ -3788,10 +4326,25 @@ class MigrationBotControlService:
                     if options.migrate_media is not None
                     else manifest.defaults.migrate_media
                 ),
+                "media_kinds": (
+                    options.media_kinds
+                    if options.media_kinds is not None
+                    else manifest.defaults.media_kinds
+                ),
+                "service_messages": (
+                    options.service_messages
+                    if options.service_messages is not None
+                    else manifest.defaults.service_messages
+                ),
                 "reply_mode": (
                     options.reply_mode
                     if options.reply_mode is not None
                     else manifest.defaults.reply_mode
+                ),
+                "output_template": (
+                    validate_output_template(options.output_template)
+                    if options.output_template is not None
+                    else manifest.defaults.output_template
                 ),
                 "identity_policy": (
                     options.identity_policy
@@ -3921,6 +4474,7 @@ class MigrationBotControlService:
                 include_to=options.include_to,
                 migrate_media=options.migrate_media,
                 reply_mode=options.reply_mode,
+                output_template=options.output_template,
                 target_strategy="create",
                 target_title=options.target_title,
                 source_backend=options.source_backend,
@@ -3999,6 +4553,15 @@ class MigrationBotControlService:
                         child_existing.reply_mode
                         if child_existing is not None
                         else self._manifest_defaults().reply_mode
+                    )
+                ),
+                output_template=(
+                    validate_output_template(options.output_template)
+                    if options.output_template is not None
+                    else (
+                        child_existing.output_template
+                        if child_existing is not None
+                        else self._manifest_defaults().output_template
                     )
                 ),
                 identity_policy=(

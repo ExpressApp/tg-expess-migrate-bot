@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from pybotx import MentionBuilder
 
+from extg_shared.contracts.output_template import render_output_template
 from extg_shared.contracts.models import (
     CanonicalEntity,
     CanonicalMessage,
@@ -26,24 +27,15 @@ class MessageRenderer:
         source_chat_title: str | None = None,
         reply_preview: ReplyPreview | None = None,
         reply_mode: str = "inline_quote",
+        output_template: str | None = None,
     ) -> RenderedMessage:
+        header = self._render_header(message, source_chat_title=source_chat_title)
         body = self._render_body_content(message)
-        if reply_mode == "none":
-            pass
-        elif reply_mode == "source_id":
-            if message.source_reply_to_message_id:
-                body = (
-                    f"↪ Reply to source message #{message.source_reply_to_message_id}\n\n"
-                    f"{body}"
-                )
-        elif reply_preview:
-            body = self._render_reply_block(reply_preview, body)
-        elif message.source_reply_to_message_id:
-            body = (
-                f"↪ Reply to source message #{message.source_reply_to_message_id}\n\n"
-                f"{body}"
-            )
-
+        reply_block = self._render_reply_prefix(
+            message=message,
+            reply_preview=reply_preview,
+            reply_mode=reply_mode,
+        )
         if message.attachment_failures:
             failure_lines = [
                 self._render_attachment_failure_line(reason)
@@ -56,7 +48,6 @@ class MessageRenderer:
             footer = (
                 f"[edited in source at {self._format_timestamp(message.edited_at_utc)}]"
             )
-        header = self._render_header(message, source_chat_title=source_chat_title)
         attachments = [
             RenderedAttachment(
                 filename=attachment.filename,
@@ -64,9 +55,35 @@ class MessageRenderer:
             )
             for attachment in message.attachments
         ]
+        if output_template and output_template.strip():
+            rendered_text = render_output_template(
+                template=output_template,
+                values={
+                    "author": message.sender_display_name,
+                    "username": message.sender_username or "",
+                    "timestamp": self._format_timestamp(message.sent_at_utc),
+                    "source_chat_title": source_chat_title or "",
+                    "source_chat_id": message.source_chat_id,
+                    "source_message_id": message.source_message_id,
+                    "reply_to_source_message_id": message.source_reply_to_message_id or "",
+                    "reply_block": reply_block,
+                    "body": body,
+                    "header": header,
+                    "footer": footer or "",
+                },
+            ).strip()
+            return RenderedMessage(
+                display_header="",
+                display_body=rendered_text,
+                footer=None,
+                attachments=attachments,
+            )
+        rendered_body = body
+        if reply_block:
+            rendered_body = f"{reply_block}\n\n{body}".strip()
         return RenderedMessage(
             display_header=header,
-            display_body=body,
+            display_body=rendered_body,
             footer=footer,
             attachments=attachments,
         )
@@ -139,20 +156,32 @@ class MessageRenderer:
         except (ValueError, TypeError):
             return fallback
 
-    def _render_reply_block(
+    def _render_reply_prefix(
         self,
-        preview: ReplyPreview,
-        body: str,
+        *,
+        message: CanonicalMessage,
+        reply_preview: ReplyPreview | None,
+        reply_mode: str,
     ) -> str:
-        if preview.sent_at_utc:
+        if reply_mode == "none":
+            return ""
+        if reply_mode == "source_id":
+            if message.source_reply_to_message_id:
+                return f"↪ Reply to source message #{message.source_reply_to_message_id}"
+            return ""
+        if reply_preview is None:
+            if message.source_reply_to_message_id:
+                return f"↪ Reply to source message #{message.source_reply_to_message_id}"
+            return ""
+        if reply_preview.sent_at_utc:
             header = (
-                f"↪ Reply to [{self._format_timestamp(preview.sent_at_utc)}] "
-                f"{preview.author_display_name}:"
+                f"↪ Reply to [{self._format_timestamp(reply_preview.sent_at_utc)}] "
+                f"{reply_preview.author_display_name}:"
             )
         else:
-            header = f"↪ Reply to {preview.author_display_name}:"
-        quote = preview.excerpt or "[source message unavailable]"
-        return f'{header}\n"{quote}"\n\n{body}'.strip()
+            header = f"↪ Reply to {reply_preview.author_display_name}:"
+        quote = reply_preview.excerpt or "[source message unavailable]"
+        return f'{header}\n"{quote}"'
 
     def _format_timestamp(self, value) -> str:
         localized = value.astimezone(self._timezone)

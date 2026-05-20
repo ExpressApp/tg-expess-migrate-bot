@@ -47,6 +47,20 @@ def test_parse_migrate_chat_options_rejects_unknown_access_strategy():
         parse_migrate_chat_options("chat-1 access=invalid")
 
 
+def test_parse_migrate_chat_options_supports_none_access_strategy():
+    source_chat_id, options = parse_migrate_chat_options("chat-1 access=none")
+
+    assert source_chat_id == "chat-1"
+    assert options.access_strategy == "none"
+
+
+def test_parse_migrate_chat_options_supports_service_toggle():
+    source_chat_id, options = parse_migrate_chat_options("chat-1 service=off")
+
+    assert source_chat_id == "chat-1"
+    assert options.service_messages is False
+
+
 def test_parse_migrate_all_options_rejects_unknown_reply_mode():
     with pytest.raises(CommandArgumentError):
         parse_migrate_all_options("format=invalid")

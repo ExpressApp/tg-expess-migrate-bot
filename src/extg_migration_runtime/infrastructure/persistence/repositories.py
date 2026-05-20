@@ -39,6 +39,7 @@ from extg_shared.contracts.models import (
     MessageMappingRecord,
     MigrationCheckpoint,
     MigrationStateRecord,
+    OperatorMigrationDefaultsRecord,
     OperatorTelegramSessionRecord,
     PublishedIntegrationEvent,
     ServiceWatermarkRecord,
@@ -58,6 +59,7 @@ from extg_migration_runtime.infrastructure.persistence.models import (
     MigrationInventorySnapshotModel,
     MigrationJobModel,
     MigrationMessageMapModel,
+    MigrationOperatorDefaultsModel,
     MigrationStateModel,
     ServiceWatermarkModel,
     TelegramExportSnapshotModel,
@@ -232,6 +234,8 @@ class PostgresChatMappingRepository:
             "target_chat_id": record.target_chat_id,
             "target_chat_title": record.target_chat_title,
             "status": record.status,
+            "member_success_count": record.member_success_count,
+            "member_total_count": record.member_total_count,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
         }
@@ -245,12 +249,27 @@ class PostgresChatMappingRepository:
                 "target_chat_id": record.target_chat_id,
                 "target_chat_title": record.target_chat_title,
                 "status": record.status,
+                "member_success_count": record.member_success_count,
+                "member_total_count": record.member_total_count,
                 "updated_at": record.updated_at,
             },
         )
         async with self._session_factory() as session:
             await session.execute(statement)
             await session.commit()
+
+    async def list_by_migration(
+        self,
+        migration_id: str,
+    ) -> list[ChatMappingRecord]:
+        statement = (
+            select(MigrationChatMapModel)
+            .where(MigrationChatMapModel.migration_id == migration_id)
+            .order_by(MigrationChatMapModel.source_chat_id.asc())
+        )
+        async with self._session_factory() as session:
+            models = (await session.execute(statement)).scalars().all()
+            return [_chat_to_domain(model) for model in models]
 
 
 class PostgresChatMigrationConfigRepository:
@@ -303,7 +322,10 @@ class PostgresChatMigrationConfigRepository:
                 include_from=record.include_from,
                 include_to=record.include_to,
                 migrate_media=record.migrate_media,
+                media_kinds_json=list(record.media_kinds) if record.media_kinds is not None else None,
+                service_messages=record.service_messages,
                 reply_mode=record.reply_mode,
+                output_template=record.output_template,
                 identity_policy=record.identity_policy,
                 access_strategy=record.access_strategy,
                 topic_strategy=record.topic_strategy,
@@ -330,7 +352,12 @@ class PostgresChatMigrationConfigRepository:
                     "include_from": record.include_from,
                     "include_to": record.include_to,
                     "migrate_media": record.migrate_media,
+                    "media_kinds_json": (
+                        list(record.media_kinds) if record.media_kinds is not None else None
+                    ),
+                    "service_messages": record.service_messages,
                     "reply_mode": record.reply_mode,
+                    "output_template": record.output_template,
                     "identity_policy": record.identity_policy,
                     "access_strategy": record.access_strategy,
                     "topic_strategy": record.topic_strategy,
@@ -379,6 +406,69 @@ class PostgresChatMigrationConfigRepository:
             deleted_id = (await session.execute(statement)).scalar_one_or_none()
             await session.commit()
             return deleted_id is not None
+
+
+class PostgresOperatorMigrationDefaultsRepository:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    async def get(
+        self,
+        migration_id: str,
+        operator_huid: str,
+    ) -> OperatorMigrationDefaultsRecord | None:
+        statement = select(MigrationOperatorDefaultsModel).where(
+            MigrationOperatorDefaultsModel.migration_id == migration_id,
+            MigrationOperatorDefaultsModel.operator_huid == operator_huid,
+        )
+        async with self._session_factory() as session:
+            model = (await session.execute(statement)).scalar_one_or_none()
+            return _operator_defaults_to_domain(model) if model else None
+
+    async def save(
+        self,
+        record: OperatorMigrationDefaultsRecord,
+    ) -> OperatorMigrationDefaultsRecord:
+        statement = (
+            insert(MigrationOperatorDefaultsModel)
+            .values(
+                migration_id=record.migration_id,
+                operator_huid=record.operator_huid,
+                include_from=record.include_from,
+                include_to=record.include_to,
+                migrate_media=record.migrate_media,
+                media_kinds_json=list(record.media_kinds) if record.media_kinds is not None else None,
+                service_messages=record.service_messages,
+                reply_mode=record.reply_mode,
+                output_template=record.output_template,
+                access_strategy=record.access_strategy,
+                topic_strategy=record.topic_strategy,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+            )
+            .on_conflict_do_update(
+                constraint="uq_migration_operator_defaults_key",
+                set_={
+                    "include_from": record.include_from,
+                    "include_to": record.include_to,
+                    "migrate_media": record.migrate_media,
+                    "media_kinds_json": (
+                        list(record.media_kinds) if record.media_kinds is not None else None
+                    ),
+                    "service_messages": record.service_messages,
+                    "reply_mode": record.reply_mode,
+                    "output_template": record.output_template,
+                    "access_strategy": record.access_strategy,
+                    "topic_strategy": record.topic_strategy,
+                    "updated_at": record.updated_at,
+                },
+            )
+            .returning(MigrationOperatorDefaultsModel)
+        )
+        async with self._session_factory() as session:
+            model = (await session.execute(statement)).scalar_one()
+            await session.commit()
+            return _operator_defaults_to_domain(model)
 
 
 class PostgresMessageMappingRepository:
@@ -2697,6 +2787,8 @@ def _chat_to_domain(model: MigrationChatMapModel) -> ChatMappingRecord:
         updated_at=model.updated_at,
         anchor_cts_host=model.anchor_cts_host,
         anchor_bot_id=model.anchor_bot_id,
+        member_success_count=model.member_success_count,
+        member_total_count=model.member_total_count,
     )
 
 
@@ -2712,7 +2804,10 @@ def _chat_config_to_domain(model: MigrationChatConfigModel) -> ChatMigrationConf
         include_from=model.include_from,
         include_to=model.include_to,
         migrate_media=model.migrate_media,
+        media_kinds=tuple(model.media_kinds_json) if model.media_kinds_json is not None else None,
+        service_messages=model.service_messages,
         reply_mode=model.reply_mode,
+        output_template=model.output_template,
         identity_policy=model.identity_policy,
         updated_by_huid=model.updated_by_huid,
         created_at=model.created_at,
@@ -2727,6 +2822,26 @@ def _chat_config_to_domain(model: MigrationChatConfigModel) -> ChatMigrationConf
         source_topic_id=model.source_topic_id,
         source_thread_id=model.source_thread_id,
         source_thread_title=model.source_thread_title,
+    )
+
+
+def _operator_defaults_to_domain(
+    model: MigrationOperatorDefaultsModel,
+) -> OperatorMigrationDefaultsRecord:
+    return OperatorMigrationDefaultsRecord(
+        migration_id=model.migration_id,
+        operator_huid=model.operator_huid,
+        include_from=model.include_from,
+        include_to=model.include_to,
+        migrate_media=model.migrate_media,
+        media_kinds=tuple(model.media_kinds_json) if model.media_kinds_json is not None else None,
+        service_messages=model.service_messages,
+        reply_mode=model.reply_mode,
+        output_template=model.output_template,
+        access_strategy=model.access_strategy,
+        topic_strategy=model.topic_strategy,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
     )
 
 

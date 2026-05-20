@@ -9,9 +9,12 @@ from extg_shared.contracts.errors import ConfigurationError
 
 class ManifestDefaults(BaseModel):
     migrate_media: bool = True
+    media_kinds: tuple[str, ...] | None = None
+    service_messages: bool = True
     propagate_edits: bool = False
     propagate_deletes: bool = False
     reply_mode: str = "inline_quote"
+    output_template: str | None = None
     identity_policy: str = "display_only"
     access_strategy: str = "direct_add"
 
@@ -33,7 +36,10 @@ class ManifestDialog(BaseModel):
     include_from: str | None = None
     include_to: str | None = None
     migrate_media: bool | None = None
+    media_kinds: tuple[str, ...] | None = None
+    service_messages: bool | None = None
     reply_mode: str | None = None
+    output_template: str | None = None
     identity_policy: str | None = None
     access_strategy: str | None = None
     topic_strategy: str = "single_chat"

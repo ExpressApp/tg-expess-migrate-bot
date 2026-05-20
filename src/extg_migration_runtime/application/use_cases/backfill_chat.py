@@ -36,6 +36,7 @@ from extg_shared.contracts.models import (
     CanonicalMessage,
     ChatMappingRecord,
     ClaimState,
+    ContentType,
     HistoryCursor,
     MessageImportStatus,
     MessageMappingRecord,
@@ -121,6 +122,26 @@ class BackfillChatUseCase:
         cache: dict[str, CanonicalMessage] = {}
         last_message_id: str | None = cursor.last_source_message_id if cursor else None
         stop_requested = False
+        migrate_media = self._resolve_migrate_media(
+            manifest=command.manifest,
+            dialog=dialog,
+        )
+        media_kinds = self._resolve_media_kinds(
+            manifest=command.manifest,
+            dialog=dialog,
+        )
+        reply_mode = self._resolve_reply_mode(
+            manifest=command.manifest,
+            dialog=dialog,
+        )
+        output_template = self._resolve_output_template(
+            manifest=command.manifest,
+            dialog=dialog,
+        )
+        service_messages_enabled = self._resolve_service_messages(
+            manifest=command.manifest,
+            dialog=dialog,
+        )
 
         while not stop_requested:
             batch = await self._retry_policy.run(
@@ -155,15 +176,36 @@ class BackfillChatUseCase:
                                 self._message_delivery_service.prefetch_attachments(
                                     canonical=next_entry.canonical,
                                     source_backend=dialog.source_backend,
-                                    migrate_media=self._resolve_migrate_media(
-                                        manifest=command.manifest,
-                                        dialog=dialog,
-                                    ),
+                                    migrate_media=migrate_media,
+                                    media_kinds=media_kinds,
                                 ),
                             )
                     canonical = entry.canonical
                     if not entry.should_deliver:
                         await self._cleanup_prefetch_task(current_prefetch_task)
+                        cursor = await self._advance_checkpoint(command, canonical)
+                        last_message_id = canonical.source_message_id
+                        if entry.stop_after:
+                            stop_requested = True
+                            break
+                        continue
+                    if (
+                        canonical.content_type is ContentType.SERVICE
+                        and not service_messages_enabled
+                    ):
+                        await self._cleanup_prefetch_task(current_prefetch_task)
+                        await self._audit_repository.add(
+                            AuditEvent(
+                                migration_id=command.manifest.migration_id,
+                                source_chat_id=canonical.source_chat_id,
+                                source_message_id=canonical.source_message_id,
+                                event_type="message_skipped_by_policy",
+                                severity=AuditSeverity.INFO,
+                                payload_json={"reason": "service messages disabled by manifest"},
+                                created_at=self._now(),
+                            ),
+                        )
+                        skipped += 1
                         cursor = await self._advance_checkpoint(command, canonical)
                         last_message_id = canonical.source_message_id
                         if entry.stop_after:
@@ -212,14 +254,6 @@ class BackfillChatUseCase:
                         )
 
                     reply_preview = self._build_reply_preview(canonical, cache)
-                    migrate_media = self._resolve_migrate_media(
-                        manifest=command.manifest,
-                        dialog=dialog,
-                    )
-                    reply_mode = self._resolve_reply_mode(
-                        manifest=command.manifest,
-                        dialog=dialog,
-                    )
 
                     prefetched_attachments = await self._resolve_prefetched_attachments(
                         current_prefetch_task,
@@ -233,7 +267,9 @@ class BackfillChatUseCase:
                             source_chat_title=entry.source_chat_title,
                             reply_preview=reply_preview,
                             migrate_media=migrate_media,
+                            media_kinds=media_kinds,
                             reply_mode=reply_mode,
+                            output_template=output_template,
                             prefetched_attachments=prefetched_attachments,
                         )
                     except asyncio.CancelledError:
@@ -513,6 +549,16 @@ class BackfillChatUseCase:
             return dialog.migrate_media
         return manifest.defaults.migrate_media
 
+    def _resolve_media_kinds(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> tuple[str, ...] | None:
+        if dialog.media_kinds is not None:
+            return dialog.media_kinds
+        return manifest.defaults.media_kinds
+
     def _resolve_reply_mode(
         self,
         *,
@@ -522,6 +568,26 @@ class BackfillChatUseCase:
         if dialog.reply_mode is not None:
             return dialog.reply_mode
         return manifest.defaults.reply_mode
+
+    def _resolve_output_template(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> str | None:
+        if dialog.output_template is not None:
+            return dialog.output_template
+        return manifest.defaults.output_template
+
+    def _resolve_service_messages(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> bool:
+        if dialog.service_messages is not None:
+            return dialog.service_messages
+        return manifest.defaults.service_messages
 
     def _attachment_failure_payload(
         self,

@@ -5,7 +5,7 @@ import httpx
 import pytest
 from pybotx import ChatTypes
 from pybotx.constants import MAX_NOTIFICATION_BODY_LENGTH
-from pybotx.models.attachments import AttachmentDocument, AttachmentImage, AttachmentVoice
+from pybotx.models.attachments import AttachmentDocument, AttachmentImage, AttachmentVideo, AttachmentVoice
 
 from extg_shared.contracts.models import ExpressStagedFile, FilePayload
 from extg_migration_runtime.infrastructure.express.pybotx_gateway import (
@@ -230,6 +230,33 @@ async def test_send_message_with_photo_uses_attachment_image():
     )
 
     assert isinstance(bot.calls[-1]["file"], AttachmentImage)
+
+
+@pytest.mark.asyncio
+async def test_send_message_with_video_note_uses_attachment_video():
+    bot = StubBot()
+    gateway = PybotxExpressGateway(
+        bot_id="043a8472-0ec8-5f35-a5a4-3f3ef3ae4aa9",
+        cts_url="https://cts11dev.ccsteam.ru/",
+        secret_key="secret",
+        bot=bot,
+    )
+
+    result = await gateway.send_message(
+        "6367c7c9-6dec-5960-8aa8-6b6c6b57048e",
+        "[video_note] round.mp4",
+        file=FilePayload(
+            content=b"round-video-data",
+            filename="round.mp4",
+            mime_type="video/mp4",
+            media_kind="video_note",
+            duration_seconds=11,
+        ),
+    )
+
+    assert result.target_sync_id == "sync-id"
+    assert isinstance(bot.calls[-1]["file"], AttachmentVideo)
+    assert bot.calls[-1]["file"].duration == 11
 
 
 @pytest.mark.asyncio

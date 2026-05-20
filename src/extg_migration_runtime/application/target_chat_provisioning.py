@@ -77,6 +77,13 @@ class ParticipantAccessApplyResult:
         return bool(self.added_huids or self.invited_huids)
 
 
+@dataclass(frozen=True, slots=True)
+class _ProvisionedTargetChat:
+    target_chat_id: str
+    member_success_count: int | None = None
+    member_total_count: int | None = None
+
+
 class TargetChatProvisioningService:
     def __init__(
         self,
@@ -180,11 +187,13 @@ class TargetChatProvisioningService:
                     f"source_chat_id={dialog.source_chat_id} requires target_chat_id for bind strategy",
                 )
             target_chat_id = dialog.target_chat_id
+            member_success_count = None
+            member_total_count = None
             status = "bound"
         elif dialog.target_strategy == "create":
             target_chat_title = dialog.target_title or dialog.source_chat_id
             if dialog.source_chat_type == "private":
-                target_chat_id = await self._provision_private_chat(
+                provisioned = await self._provision_private_chat(
                     target_chat_title=target_chat_title,
                     migration_id=migration_id,
                     source_chat_id=dialog.source_chat_id,
@@ -194,7 +203,7 @@ class TargetChatProvisioningService:
                     anchor_cts_host=dialog.anchor_cts_host,
                 )
             elif dialog.source_chat_type == "channel":
-                target_chat_id = await self._provision_channel_chat(
+                provisioned = await self._provision_channel_chat(
                     target_chat_title=target_chat_title,
                     migration_id=migration_id,
                     source_chat_id=dialog.source_chat_id,
@@ -204,7 +213,7 @@ class TargetChatProvisioningService:
                     anchor_cts_host=dialog.anchor_cts_host,
                 )
             else:
-                target_chat_id = await self._provision_group_chat(
+                provisioned = await self._provision_group_chat(
                     target_chat_title=target_chat_title,
                     migration_id=migration_id,
                     source_chat_id=dialog.source_chat_id,
@@ -215,6 +224,9 @@ class TargetChatProvisioningService:
                     access_strategy=dialog.access_strategy or "direct_add",
                     anchor_cts_host=dialog.anchor_cts_host,
                 )
+            target_chat_id = provisioned.target_chat_id
+            member_success_count = provisioned.member_success_count
+            member_total_count = provisioned.member_total_count
             status = "active"
         else:
             raise FatalItemError(
@@ -240,6 +252,8 @@ class TargetChatProvisioningService:
             updated_at=self._now(),
             anchor_cts_host=dialog.anchor_cts_host,
             anchor_bot_id=dialog.anchor_bot_id,
+            member_success_count=member_success_count,
+            member_total_count=member_total_count,
         )
         await self._chat_mapping_repository.save(record)
         return record
@@ -439,7 +453,7 @@ class TargetChatProvisioningService:
         initiator_huid: str | None,
         access_strategy: str,
         anchor_cts_host: str | None,
-    ) -> str:
+    ) -> _ProvisionedTargetChat:
         normalized_initiator_huid = (initiator_huid or "").strip()
         if not normalized_initiator_huid:
             raise FatalItemError(
@@ -511,7 +525,7 @@ class TargetChatProvisioningService:
             initiator_huid=initiator_huid,
             anchor_cts_host=anchor_cts_host,
         )
-        await self._apply_member_access_strategy(
+        access_result = await self._apply_member_access_strategy(
             chat_kind="private",
             migration_id=migration_id,
             source_chat_id=source_chat_id,
@@ -524,7 +538,16 @@ class TargetChatProvisioningService:
             anchor_cts_host=anchor_cts_host,
             skip_huids=set(seed_participants),
         )
-        return target_chat_id
+        member_success_count, member_total_count = self._member_sync_counts(
+            participant_targets=participant_targets,
+            access_strategy=access_strategy,
+            access_result=access_result,
+        )
+        return _ProvisionedTargetChat(
+            target_chat_id=target_chat_id,
+            member_success_count=member_success_count,
+            member_total_count=member_total_count,
+        )
 
     async def _provision_group_chat(
         self,
@@ -538,7 +561,7 @@ class TargetChatProvisioningService:
         initiator_huid: str | None,
         access_strategy: str,
         anchor_cts_host: str | None,
-    ) -> str:
+    ) -> _ProvisionedTargetChat:
         participant_targets = await self._prepare_group_participant_targets(
             migration_id=migration_id,
             source_chat_id=source_chat_id,
@@ -568,7 +591,7 @@ class TargetChatProvisioningService:
             initiator_huid=initiator_huid,
             anchor_cts_host=anchor_cts_host,
         )
-        await self._apply_member_access_strategy(
+        access_result = await self._apply_member_access_strategy(
             chat_kind="group",
             migration_id=migration_id,
             source_chat_id=source_chat_id,
@@ -581,7 +604,16 @@ class TargetChatProvisioningService:
             anchor_cts_host=anchor_cts_host,
             skip_huids=set(seed_participants),
         )
-        return target_chat_id
+        member_success_count, member_total_count = self._member_sync_counts(
+            participant_targets=participant_targets,
+            access_strategy=access_strategy,
+            access_result=access_result,
+        )
+        return _ProvisionedTargetChat(
+            target_chat_id=target_chat_id,
+            member_success_count=member_success_count,
+            member_total_count=member_total_count,
+        )
 
     async def _sync_group_chat_members(
         self,
@@ -610,9 +642,23 @@ class TargetChatProvisioningService:
             access_strategy=dialog.access_strategy or "direct_add",
             anchor_cts_host=existing.anchor_cts_host or dialog.anchor_cts_host,
         )
-        if not access_result.changed:
+        member_success_count, member_total_count = self._member_sync_counts(
+            participant_targets=participant_targets,
+            access_strategy=dialog.access_strategy or "direct_add",
+            access_result=access_result,
+        )
+        if (
+            not access_result.changed
+            and existing.member_success_count == member_success_count
+            and existing.member_total_count == member_total_count
+        ):
             return existing
-        updated = replace(existing, updated_at=self._now())
+        updated = replace(
+            existing,
+            updated_at=self._now(),
+            member_success_count=member_success_count,
+            member_total_count=member_total_count,
+        )
         await self._chat_mapping_repository.save(updated)
         return updated
 
@@ -641,9 +687,23 @@ class TargetChatProvisioningService:
             access_strategy=access_strategy,
             anchor_cts_host=existing.anchor_cts_host or dialog.anchor_cts_host,
         )
-        if not access_result.changed:
+        member_success_count, member_total_count = self._member_sync_counts(
+            participant_targets=participant_targets,
+            access_strategy=access_strategy,
+            access_result=access_result,
+        )
+        if (
+            not access_result.changed
+            and existing.member_success_count == member_success_count
+            and existing.member_total_count == member_total_count
+        ):
             return existing
-        updated = replace(existing, updated_at=self._now())
+        updated = replace(
+            existing,
+            updated_at=self._now(),
+            member_success_count=member_success_count,
+            member_total_count=member_total_count,
+        )
         await self._chat_mapping_repository.save(updated)
         return updated
 
@@ -745,7 +805,7 @@ class TargetChatProvisioningService:
         initiator_huid: str | None,
         access_strategy: str,
         anchor_cts_host: str | None,
-    ) -> str:
+    ) -> _ProvisionedTargetChat:
         normalized_initiator_huid = self._require_channel_initiator_huid(
             source_chat_id=source_chat_id,
             initiator_huid=initiator_huid,
@@ -786,7 +846,7 @@ class TargetChatProvisioningService:
             initiator_huid=initiator_huid,
             anchor_cts_host=anchor_cts_host,
         )
-        await self._apply_channel_access_strategy(
+        access_result = await self._apply_channel_access_strategy(
             migration_id=migration_id,
             source_chat_id=source_chat_id,
             source_backend=source_backend,
@@ -798,7 +858,16 @@ class TargetChatProvisioningService:
             anchor_cts_host=anchor_cts_host,
             skip_huids=set(seed_participants),
         )
-        return target_chat_id
+        member_success_count, member_total_count = self._member_sync_counts(
+            participant_targets=participant_targets,
+            access_strategy=access_strategy,
+            access_result=access_result,
+        )
+        return _ProvisionedTargetChat(
+            target_chat_id=target_chat_id,
+            member_success_count=member_success_count,
+            member_total_count=member_total_count,
+        )
 
     async def _apply_channel_access_strategy(
         self,
@@ -827,6 +896,20 @@ class TargetChatProvisioningService:
             anchor_cts_host=anchor_cts_host,
             skip_huids=skip_huids,
         )
+
+    def _member_sync_counts(
+        self,
+        *,
+        participant_targets: list[ResolvedParticipantTarget],
+        access_strategy: str,
+        access_result: ParticipantAccessApplyResult,
+    ) -> tuple[int | None, int | None]:
+        normalized_strategy = (access_strategy or "direct_add").strip().lower()
+        if normalized_strategy == "none" or not participant_targets:
+            return None, None
+        total_count = len(participant_targets)
+        success_count = max(total_count - len(access_result.failed_targets), 0)
+        return success_count, total_count
 
     async def _resolve_participant_targets(
         self,
@@ -1075,6 +1158,8 @@ class TargetChatProvisioningService:
             skip_huids=skip_huids or set(),
         )
         effective_anchor_cts_host = self._resolve_anchor_cts_host(anchor_cts_host)
+        if normalized_access_strategy == "none":
+            return ParticipantAccessApplyResult()
         if normalized_access_strategy == "invite_link":
             return await self._dispatch_access_invites(
                 chat_kind=chat_kind,

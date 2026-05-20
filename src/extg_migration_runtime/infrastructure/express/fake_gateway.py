@@ -303,7 +303,7 @@ def _attachment_type_for_media_kind(media_kind: str | None) -> str:
     normalized = (media_kind or "document").lower()
     if normalized in {"photo", "sticker"}:
         return "image"
-    if normalized == "video":
+    if normalized in {"video", "video_note"}:
         return "video"
     if normalized == "voice":
         return "voice"

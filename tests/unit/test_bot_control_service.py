@@ -1,5 +1,6 @@
 import asyncio
 import json
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
@@ -23,6 +24,7 @@ from extg_migration_runtime.infrastructure.archive.stage_store import (
     InMemoryTelegramExportArchiveStageStore,
 )
 from extg_migration_runtime.application.use_cases.reconcile_migration import (
+    ReconcileChatResult,
     ReconcileMigrationResult,
 )
 from extg_migration_runtime.application.target_chat_provisioning import (
@@ -55,6 +57,7 @@ from extg_shared.contracts.models import (
     MigrationCheckpoint,
     MigrationJobRecord,
     MigrationJobStatus,
+    OperatorMigrationDefaultsRecord,
     SourceChannelAccessProfile,
     SourceDialog,
     SourceParticipant,
@@ -200,6 +203,35 @@ class StubChatMigrationConfigRepository:
 
     async def delete(self, migration_id: str, source_chat_id: str):
         return self._items.pop((migration_id, source_chat_id), None) is not None
+
+
+class StubOperatorMigrationDefaultsRepository:
+    def __init__(self) -> None:
+        self._items = {}
+
+    async def get(self, migration_id: str, operator_huid: str):
+        return self._items.get((migration_id, operator_huid))
+
+    async def save(self, record: OperatorMigrationDefaultsRecord):
+        key = (record.migration_id, record.operator_huid)
+        existing = self._items.get(key)
+        normalized = OperatorMigrationDefaultsRecord(
+            migration_id=record.migration_id,
+            operator_huid=record.operator_huid,
+            include_from=record.include_from,
+            include_to=record.include_to,
+            migrate_media=record.migrate_media,
+            media_kinds=record.media_kinds,
+            service_messages=record.service_messages,
+            reply_mode=record.reply_mode,
+            access_strategy=record.access_strategy,
+            topic_strategy=record.topic_strategy,
+            created_at=existing.created_at if existing is not None else record.created_at,
+            updated_at=record.updated_at,
+            output_template=record.output_template,
+        )
+        self._items[key] = normalized
+        return normalized
 
 
 class StubAuditRepository:
@@ -648,6 +680,7 @@ def build_service(
     express_gateway=None,
     backfill_use_case=None,
     operator_huids=("operator-1",),
+    operator_migration_defaults_repository=None,
 ):
     settings = build_settings(operator_huids=operator_huids)
     chat_mapping_repository = StubChatMappingRepository()
@@ -677,6 +710,9 @@ def build_service(
     telegram_export_archive_stage_store = InMemoryTelegramExportArchiveStageStore()
     telegram_session_context = telegram_session_context or TelegramSessionContext()
     telegram_session_service = telegram_session_service or StubTelegramSessionService()
+    operator_migration_defaults_repository = (
+        operator_migration_defaults_repository or StubOperatorMigrationDefaultsRepository()
+    )
     service = MigrationBotControlService(
         settings=settings,
         telegram_gateway=telegram_gateway,
@@ -690,6 +726,7 @@ def build_service(
         resume_delta_use_case=resume_delta_use_case,
         chat_mapping_repository=chat_mapping_repository,
         chat_migration_config_repository=StubChatMigrationConfigRepository(),
+        operator_migration_defaults_repository=operator_migration_defaults_repository,
         checkpoint_repository=StubCheckpointRepository(checkpoints=checkpoints),
         message_mapping_repository=StubMessageMappingRepository(summaries=summaries),
         migration_state_repository=StubMigrationStateRepository(),
@@ -709,6 +746,59 @@ def build_service(
         logger=StubLogger(),
     )
     return service, backfill_use_case
+
+
+@pytest.mark.asyncio
+async def test_show_operator_defaults_returns_manifest_defaults_when_repo_empty():
+    service, _ = build_service()
+
+    result = await service.show_operator_defaults(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+    )
+
+    assert result.migration_id == "migration-bot-dynamic"
+    assert result.include_from is None
+    assert result.include_to is None
+    assert result.migrate_media is True
+    assert result.media_kinds is None
+    assert result.service_messages is True
+    assert result.reply_mode == "inline_quote"
+    assert result.output_template is None
+    assert result.access_strategy == "direct_add"
+    assert result.topic_strategy == "single_chat"
+    assert result.configured_via == "bot"
+
+
+@pytest.mark.asyncio
+async def test_configure_operator_defaults_persists_updated_values():
+    service, _ = build_service()
+
+    saved = await service.configure_operator_defaults(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        options=MigrationRunOptions(
+            include_from="2026-04-01T00:00:00Z",
+            include_to="2026-04-15T23:59:59Z",
+            migrate_media=True,
+            media_kinds=("photo", "file"),
+            service_messages=False,
+            reply_mode="source_id",
+            output_template='{"author":"{{author}}","text":"{{body}}"}',
+            topic_strategy="split_by_topic",
+        ),
+    )
+    loaded = await service.show_operator_defaults(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+    )
+
+    assert saved.include_from == "2026-04-01T00:00:00Z"
+    assert saved.include_to == "2026-04-15T23:59:59Z"
+    assert saved.media_kinds == ("photo", "file")
+    assert saved.service_messages is False
+    assert saved.reply_mode == "source_id"
+    assert saved.output_template == '{"author":"{{author}}","text":"{{body}}"}'
+    assert saved.topic_strategy == "split_by_topic"
+    assert saved.configured_via == "db"
+    assert loaded == saved
 
 
 async def drain_queued_jobs(service: MigrationBotControlService) -> None:
@@ -966,6 +1056,7 @@ async def test_start_migrate_chat_accepts_and_runs_background_job(tmp_path):
         source_chat_id="chat-1",
         options=MigrationRunOptions(
             reply_mode="source_id",
+            output_template='{"author":"{{author}}","text":"{{body}}"}',
             batch_size=7,
             progress_policy="resume",
         ),
@@ -979,6 +1070,7 @@ async def test_start_migrate_chat_accepts_and_runs_background_job(tmp_path):
     assert command.source_chat_id == "chat-1"
     assert command.batch_size == 7
     assert command.manifest.dialogs[0].reply_mode == "source_id"
+    assert command.manifest.dialogs[0].output_template == '{"author":"{{author}}","text":"{{body}}"}'
 
 
 @pytest.mark.asyncio
@@ -1243,6 +1335,46 @@ async def test_start_migrate_all_bootstraps_missing_chats_when_some_configs_exis
 
 
 @pytest.mark.asyncio
+async def test_start_migrate_all_respects_excluded_source_chat_ids():
+    service, _ = build_service(
+        dialogs=[
+            SourceDialog(
+                dialog_id="chat-1",
+                chat_type="supergroup",
+                title="Configured Chat",
+                message_count=10,
+                media_count=2,
+                approximate_bytes=1000,
+            ),
+            SourceDialog(
+                dialog_id="chat-2",
+                chat_type="supergroup",
+                title="Skipped Chat",
+                message_count=5,
+                media_count=1,
+                approximate_bytes=500,
+            ),
+        ],
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+    )
+
+    result = await service.start_migrate_all(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        options=MigrationRunOptions(
+            progress_policy="resume",
+            excluded_source_chat_ids=("chat-2",),
+        ),
+    )
+
+    assert result.status == "accepted"
+    assert result.source_chat_ids == ("chat-1",)
+    assert result.accepted_source_chat_ids == ("chat-1",)
+    assert len(result.job_keys) == 1
+
+
+@pytest.mark.asyncio
 async def test_execute_migration_job_dispatches_delta_sync_operation():
     service, _ = build_service(
         telegram_session_service=StubTelegramSessionService(
@@ -1424,7 +1556,10 @@ async def test_list_available_chats_marks_configured_and_progress():
     config_result = await service.configure_chat(
         operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
         source_chat_id="chat-1",
-        options=MigrationRunOptions(reply_mode="source_id"),
+        options=MigrationRunOptions(
+            reply_mode="source_id",
+            output_template='{"author":"{{author}}","text":"{{body}}"}',
+        ),
     )
     chats = await service.list_available_chats(
         operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
@@ -1433,6 +1568,7 @@ async def test_list_available_chats_marks_configured_and_progress():
     )
 
     assert config_result.reply_mode == "source_id"
+    assert config_result.output_template == '{"author":"{{author}}","text":"{{body}}"}'
     assert chats[0].configured is True
     assert chats[0].has_progress is True
     assert chats[0].imported_count == 3
@@ -1557,7 +1693,10 @@ async def test_show_chat_returns_db_config():
     await service.configure_chat(
         operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
         source_chat_id="1057191621",
-        options=MigrationRunOptions(reply_mode="source_id"),
+        options=MigrationRunOptions(
+            reply_mode="source_id",
+            output_template='{"author":"{{author}}","text":"{{body}}"}',
+        ),
     )
     result = await service.show_chat(
         operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
@@ -1568,6 +1707,7 @@ async def test_show_chat_returns_db_config():
     assert result.source_chat_id == "1057191621"
     assert result.source_backend == "telethon_user_session"
     assert result.reply_mode == "source_id"
+    assert result.output_template == '{"author":"{{author}}","text":"{{body}}"}'
 
 
 @pytest.mark.asyncio
@@ -1674,6 +1814,142 @@ async def test_start_archive_import_stages_snapshot_and_enqueues_job():
         and event.payload_json.get("source_chat_id") == "archive:5186712067"
         for event in service._audit_repository.events
     )
+
+
+@pytest.mark.asyncio
+async def test_start_archive_import_enables_media_for_bundled_zip_exports():
+    service, _ = build_service()
+    archive_payload = {
+        "id": 5186712067,
+        "name": "Archive Chat",
+        "type": "private_group",
+        "messages": [
+            {
+                "id": 1,
+                "type": "message",
+                "date": "2026-03-17T08:00:00",
+                "date_unixtime": "1773734400",
+                "from": "Alice",
+                "from_id": "user1",
+                "media_type": "video message",
+                "file": "files/video_note_1.mp4",
+                "mime_type": "video/mp4",
+                "text": "",
+            },
+        ],
+    }
+    archive_buffer = BytesIO()
+    with zipfile.ZipFile(archive_buffer, mode="w") as archive:
+        archive.writestr("ChatExport_2026-03-17/result.json", json.dumps(archive_payload))
+        archive.writestr("ChatExport_2026-03-17/files/video_note_1.mp4", b"video-note-payload")
+
+    result = await service.start_archive_import(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        archive_content=archive_buffer.getvalue(),
+        archive_filename="ChatExport_2026-03-17.zip",
+    )
+
+    assert result.status == "accepted"
+
+    config = await service._chat_migration_config_repository.get(
+        service._settings.bot.migration_id,
+        "archive:5186712067",
+    )
+    assert config is not None
+    assert config.migrate_media is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_archive_import_stages_snapshot_and_returns_identity_template():
+    service, _ = build_service()
+
+    archive_payload = {
+        "id": 5186712067,
+        "name": "Archive Chat",
+        "type": "private_group",
+        "messages": [
+            {
+                "id": 1,
+                "type": "message",
+                "date": "2026-03-17T08:00:00",
+                "date_unixtime": "1773734400",
+                "from": "Alice",
+                "from_id": "user1",
+                "text": "hello from archive",
+            },
+        ],
+    }
+
+    result = await service.prepare_archive_import(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        archive_content=json.dumps(archive_payload).encode("utf-8"),
+        archive_filename="result.json",
+    )
+
+    assert result.source_chat_id == "archive:5186712067"
+    assert result.source_chat_title == "Archive Chat"
+    assert result.workbook_filename == "identity_matrix.xlsx"
+    assert result.workbook_content
+
+    config = await service._chat_migration_config_repository.get(
+        service._settings.bot.migration_id,
+        "archive:5186712067",
+    )
+    assert config is not None
+    assert config.source_backend == "telegram_export_archive"
+    assert config.access_strategy == "none"
+    assert config.identity_policy == "display_only"
+
+    active_jobs = await service._migration_job_repository.list_active(
+        service._settings.bot.migration_id,
+    )
+    assert active_jobs == []
+
+
+@pytest.mark.asyncio
+async def test_start_prepared_archive_import_sets_requested_member_policy():
+    service, _ = build_service()
+
+    archive_payload = {
+        "id": 5186712067,
+        "name": "Archive Chat",
+        "type": "private_group",
+        "messages": [
+            {
+                "id": 1,
+                "type": "message",
+                "date": "2026-03-17T08:00:00",
+                "date_unixtime": "1773734400",
+                "from": "Alice",
+                "from_id": "user1",
+                "text": "hello from archive",
+            },
+        ],
+    }
+
+    prepared = await service.prepare_archive_import(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        archive_content=json.dumps(archive_payload).encode("utf-8"),
+        archive_filename="result.json",
+    )
+
+    result = await service.start_prepared_archive_import(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+        source_chat_id=prepared.source_chat_id,
+        migrate_members=True,
+        identity_matrix_uploaded=True,
+    )
+
+    assert result.status == "accepted"
+    assert result.operation == "import_archive_chat"
+
+    config = await service._chat_migration_config_repository.get(
+        service._settings.bot.migration_id,
+        prepared.source_chat_id,
+    )
+    assert config is not None
+    assert config.access_strategy == "direct_add"
+    assert config.identity_policy == "matrix_uploaded"
 
 
 @pytest.mark.asyncio
@@ -3090,6 +3366,293 @@ async def test_status_includes_archive_import_chats_marked_skip_in_all():
         for dialog in service._reconcile_migration_use_case.commands[0].manifest.dialogs
     ] == ["archive:1"]
     assert [checkpoint.source_chat_id for checkpoint in result.chat_checkpoints] == ["archive:1"]
+
+
+@pytest.mark.asyncio
+async def test_main_status_overview_sorts_completed_by_mapping_updated_at_desc():
+    service, _ = build_service(
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+    )
+    for source_chat_id, title, updated_at in (
+        ("group-1", "Group One", datetime(2026, 3, 27, 12, 0, tzinfo=UTC)),
+        ("group-2", "Group Two", datetime(2026, 3, 28, 12, 0, tzinfo=UTC)),
+    ):
+        await service._chat_migration_config_repository.save(
+            ChatMigrationConfigRecord(
+                migration_id="migration-bot-dynamic",
+                source_chat_id=source_chat_id,
+                source_chat_type="group",
+                source_chat_title=title,
+                source_backend="telethon_user_session",
+                target_strategy="create",
+                target_title=f"Imported {title}",
+                target_chat_id=None,
+                include_from=None,
+                include_to=None,
+                migrate_media=True,
+                reply_mode="inline_quote",
+                identity_policy="matrix_uploaded",
+                access_strategy="direct_add",
+                updated_by_huid="operator-1",
+                created_at=updated_at,
+                updated_at=updated_at,
+            ),
+        )
+    await service._chat_migration_config_repository.save(
+        ChatMigrationConfigRecord(
+            migration_id="migration-bot-dynamic",
+            source_chat_id="group-foreign",
+            source_chat_type="group",
+            source_chat_title="Foreign Group",
+            source_backend="telethon_user_session",
+            target_strategy="create",
+            target_title="Imported Foreign Group",
+            target_chat_id=None,
+            include_from=None,
+            include_to=None,
+            migrate_media=True,
+            reply_mode="inline_quote",
+            identity_policy="matrix_uploaded",
+            access_strategy="direct_add",
+            updated_by_huid="operator-2",
+            created_at=datetime(2026, 3, 29, 12, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 29, 12, 0, tzinfo=UTC),
+        ),
+    )
+    for source_chat_id, title, updated_at in (
+        ("group-1", "Group One", datetime(2026, 3, 27, 15, 0, tzinfo=UTC)),
+        ("group-2", "Group Two", datetime(2026, 3, 29, 15, 0, tzinfo=UTC)),
+        ("group-foreign", "Foreign Group", datetime(2026, 3, 30, 15, 0, tzinfo=UTC)),
+    ):
+        await service._chat_mapping_repository.save(
+            ChatMappingRecord(
+                migration_id="migration-bot-dynamic",
+                source_chat_id=source_chat_id,
+                source_chat_type="group",
+                source_chat_title=title,
+                target_chat_id=f"target-{source_chat_id}",
+                target_chat_title=f"Imported {title}",
+                status="completed",
+                created_at=updated_at,
+                updated_at=updated_at,
+                member_success_count=3 if source_chat_id == "group-2" else None,
+                member_total_count=3 if source_chat_id == "group-2" else None,
+            ),
+        )
+    service._reconcile_migration_use_case.result = ReconcileMigrationResult(
+        migration_id="migration-bot-dynamic",
+        chats_total=2,
+        attention_chats=0,
+        inventory_missing_chats=0,
+        source_messages_total_known=30,
+        imported_count=30,
+        failed_count=0,
+        ambiguous_count=0,
+        processing_count=0,
+        mapped_total=30,
+        gap_total_known=0,
+        source_media_total_known=0,
+        attachment_imported_count=0,
+        attachment_failed_count=0,
+        attachment_ambiguous_count=0,
+        attachment_processing_count=0,
+        attachment_skipped_count=0,
+        attachment_mapped_total=0,
+        chats=[
+            ReconcileChatResult(
+                source_chat_id="group-1",
+                source_chat_type="group",
+                source_chat_title="Group One",
+                inventory_present=True,
+                source_message_count=10,
+                imported_count=10,
+                failed_count=0,
+                ambiguous_count=0,
+                processing_count=0,
+                mapped_total=10,
+                source_media_count=0,
+                attachment_imported_count=0,
+                attachment_failed_count=0,
+                attachment_ambiguous_count=0,
+                attachment_processing_count=0,
+                attachment_skipped_count=0,
+                attachment_mapped_total=0,
+                gap_count=0,
+                requires_attention=False,
+            ),
+            ReconcileChatResult(
+                source_chat_id="group-2",
+                source_chat_type="group",
+                source_chat_title="Group Two",
+                inventory_present=True,
+                source_message_count=20,
+                imported_count=20,
+                failed_count=0,
+                ambiguous_count=0,
+                processing_count=0,
+                mapped_total=20,
+                source_media_count=0,
+                attachment_imported_count=0,
+                attachment_failed_count=0,
+                attachment_ambiguous_count=0,
+                attachment_processing_count=0,
+                attachment_skipped_count=0,
+                attachment_mapped_total=0,
+                gap_count=0,
+                requires_attention=False,
+            ),
+        ],
+    )
+
+    result = await service.main_status_overview(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+    )
+
+    assert [chat.source_chat_id for chat in result.completed_chats] == ["group-2", "group-1"]
+    assert result.completed_chats[0].imported_count == 20
+    assert result.completed_chats[0].member_success_count == 3
+    assert result.completed_chats[0].member_total_count == 3
+    assert result.completed_chats[1].source_message_count == 10
+
+
+@pytest.mark.asyncio
+async def test_main_status_overview_keeps_non_completed_owned_configs_active_and_running_first():
+    service, _ = build_service(
+        telegram_session_service=StubTelegramSessionService(
+            resolved_session_string="session-string-1",
+        ),
+    )
+    await service._chat_migration_config_repository.save(
+        ChatMigrationConfigRecord(
+            migration_id="migration-bot-dynamic",
+            source_chat_id="group-running",
+            source_chat_type="group",
+            source_chat_title="Running Group",
+            source_backend="telethon_user_session",
+            target_strategy="create",
+            target_title="Imported Running Group",
+            target_chat_id=None,
+            include_from=None,
+            include_to=None,
+            migrate_media=True,
+            reply_mode="inline_quote",
+            identity_policy="matrix_uploaded",
+            access_strategy="direct_add",
+            updated_by_huid="operator-1",
+            created_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 27, 12, 0, tzinfo=UTC),
+        ),
+    )
+    await service._chat_migration_config_repository.save(
+        ChatMigrationConfigRecord(
+            migration_id="migration-bot-dynamic",
+            source_chat_id="group-idle",
+            source_chat_type="group",
+            source_chat_title="Idle Group",
+            source_backend="telethon_user_session",
+            target_strategy="create",
+            target_title="Imported Idle Group",
+            target_chat_id=None,
+            include_from=None,
+            include_to=None,
+            migrate_media=True,
+            reply_mode="inline_quote",
+            identity_policy="matrix_uploaded",
+            access_strategy="none",
+            updated_by_huid="operator-1",
+            created_at=datetime(2026, 3, 28, 12, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 3, 28, 12, 0, tzinfo=UTC),
+        ),
+    )
+    await service._migration_job_repository.enqueue(
+        MigrationJobRecord(
+            job_key="job-1",
+            migration_id="migration-bot-dynamic",
+            operation="migrate_chat",
+            operator_huid="operator-1",
+            source_chat_ids=("group-running",),
+            batch_size=100,
+            status=MigrationJobStatus.QUEUED,
+            requested_at=datetime(2026, 3, 28, 12, 30, tzinfo=UTC),
+        ),
+    )
+    service._reconcile_migration_use_case.result = ReconcileMigrationResult(
+        migration_id="migration-bot-dynamic",
+        chats_total=2,
+        attention_chats=0,
+        inventory_missing_chats=0,
+        source_messages_total_known=15,
+        imported_count=5,
+        failed_count=0,
+        ambiguous_count=0,
+        processing_count=0,
+        mapped_total=5,
+        gap_total_known=10,
+        source_media_total_known=0,
+        attachment_imported_count=0,
+        attachment_failed_count=0,
+        attachment_ambiguous_count=0,
+        attachment_processing_count=0,
+        attachment_skipped_count=0,
+        attachment_mapped_total=0,
+        chats=[
+            ReconcileChatResult(
+                source_chat_id="group-running",
+                source_chat_type="group",
+                source_chat_title="Running Group",
+                inventory_present=True,
+                source_message_count=10,
+                imported_count=5,
+                failed_count=0,
+                ambiguous_count=0,
+                processing_count=0,
+                mapped_total=5,
+                source_media_count=0,
+                attachment_imported_count=0,
+                attachment_failed_count=0,
+                attachment_ambiguous_count=0,
+                attachment_processing_count=0,
+                attachment_skipped_count=0,
+                attachment_mapped_total=0,
+                gap_count=5,
+                requires_attention=False,
+            ),
+            ReconcileChatResult(
+                source_chat_id="group-idle",
+                source_chat_type="group",
+                source_chat_title="Idle Group",
+                inventory_present=True,
+                source_message_count=5,
+                imported_count=0,
+                failed_count=0,
+                ambiguous_count=0,
+                processing_count=0,
+                mapped_total=0,
+                source_media_count=0,
+                attachment_imported_count=0,
+                attachment_failed_count=0,
+                attachment_ambiguous_count=0,
+                attachment_processing_count=0,
+                attachment_skipped_count=0,
+                attachment_mapped_total=0,
+                gap_count=5,
+                requires_attention=False,
+            ),
+        ],
+    )
+
+    result = await service.main_status_overview(
+        operator=BotOperatorContext(huid="operator-1", chat_id="operator-chat"),
+    )
+
+    assert [chat.source_chat_id for chat in result.active_chats] == [
+        "group-running",
+        "group-idle",
+    ]
+    assert result.active_chats[0].is_running is True
+    assert result.active_chats[1].is_running is False
 
 
 @pytest.mark.asyncio

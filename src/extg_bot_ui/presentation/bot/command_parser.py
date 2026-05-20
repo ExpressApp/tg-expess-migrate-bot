@@ -205,6 +205,10 @@ def _to_run_options(parsed: ParsedArguments) -> MigrationRunOptions:
     include_from = options.pop("from", None)
     include_to = options.pop("to", None)
     migrate_media = _parse_optional_bool(options.pop("media", None), "media")
+    service_messages = _parse_optional_bool(
+        options.pop("service", None) or options.pop("service_messages", None),
+        "service",
+    )
     reply_mode = _parse_reply_mode(
         options.pop("format", None) or options.pop("reply", None),
     )
@@ -234,6 +238,7 @@ def _to_run_options(parsed: ParsedArguments) -> MigrationRunOptions:
         include_from=include_from,
         include_to=include_to,
         migrate_media=migrate_media,
+        service_messages=service_messages,
         reply_mode=reply_mode,
         target_strategy=target_strategy,
         target_title=target_title,
@@ -279,6 +284,9 @@ def _parse_access_strategy(value: str | None) -> str | None:
         return None
     normalized = value.strip().lower()
     mapping = {
+        "none": "none",
+        "skip": "none",
+        "off": "none",
         "invite": "direct_add",
         "direct_add": "direct_add",
         "add": "direct_add",
@@ -288,7 +296,7 @@ def _parse_access_strategy(value: str | None) -> str | None:
     }
     resolved = mapping.get(normalized)
     if resolved is None:
-        raise CommandArgumentError("access must be one of: invite, link")
+        raise CommandArgumentError("access must be one of: none, invite, link")
     return resolved
 
 

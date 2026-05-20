@@ -38,6 +38,7 @@ from extg_shared.contracts.models import (
     CanonicalMessage,
     ChatMappingRecord,
     ClaimState,
+    ContentType,
     HistoryCursor,
     MessageImportStatus,
     MessageMappingRecord,
@@ -291,6 +292,10 @@ class DeltaSyncUseCase:
                 manifest=command.manifest,
                 dialog=dialog,
             )
+            media_kinds = self._resolve_media_kinds(
+                manifest=command.manifest,
+                dialog=dialog,
+            )
             next_prefetch_task: asyncio.Task[tuple[PrefetchedAttachment, ...]] | None = None
             try:
                 for index, raw_message in enumerate(batch.messages):
@@ -313,6 +318,7 @@ class DeltaSyncUseCase:
                                 canonical=next_canonical,
                                 source_backend=dialog.source_backend,
                                 migrate_media=migrate_media,
+                                media_kinds=media_kinds,
                             ),
                         )
                         break
@@ -458,11 +464,44 @@ class DeltaSyncUseCase:
                 return "ambiguous"
 
             reply_preview = self._build_reply_preview(canonical, cache)
+            if (
+                canonical.content_type is ContentType.SERVICE
+                and not self._resolve_service_messages(
+                    manifest=manifest,
+                    dialog=dialog,
+                )
+            ):
+                await self._audit_repository.add(
+                    AuditEvent(
+                        migration_id=manifest.migration_id,
+                        source_chat_id=canonical.source_chat_id,
+                        source_message_id=canonical.source_message_id,
+                        event_type="delta_message_skipped_by_policy",
+                        severity=AuditSeverity.INFO,
+                        payload_json={"reason": "service messages disabled by manifest"},
+                        created_at=self._now(),
+                    ),
+                )
+                await self._advance_checkpoint(
+                    migration_id=manifest.migration_id,
+                    source_chat_id=canonical.source_chat_id,
+                    mode=advance_mode,
+                    message=canonical,
+                )
+                return "skipped"
             migrate_media = self._resolve_migrate_media(
                 manifest=manifest,
                 dialog=dialog,
             )
+            media_kinds = self._resolve_media_kinds(
+                manifest=manifest,
+                dialog=dialog,
+            )
             reply_mode = self._resolve_reply_mode(
+                manifest=manifest,
+                dialog=dialog,
+            )
+            output_template = self._resolve_output_template(
                 manifest=manifest,
                 dialog=dialog,
             )
@@ -476,7 +515,9 @@ class DeltaSyncUseCase:
                     source_chat_title=source_chat_title,
                     reply_preview=reply_preview,
                     migrate_media=migrate_media,
+                    media_kinds=media_kinds,
                     reply_mode=reply_mode,
+                    output_template=output_template,
                     prefetched_attachments=prefetched_attachments,
                 )
             except asyncio.CancelledError:
@@ -856,6 +897,16 @@ class DeltaSyncUseCase:
             return dialog.migrate_media
         return manifest.defaults.migrate_media
 
+    def _resolve_media_kinds(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> tuple[str, ...] | None:
+        if dialog.media_kinds is not None:
+            return dialog.media_kinds
+        return manifest.defaults.media_kinds
+
     def _resolve_reply_mode(
         self,
         *,
@@ -865,6 +916,26 @@ class DeltaSyncUseCase:
         if dialog.reply_mode is not None:
             return dialog.reply_mode
         return manifest.defaults.reply_mode
+
+    def _resolve_output_template(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> str | None:
+        if dialog.output_template is not None:
+            return dialog.output_template
+        return manifest.defaults.output_template
+
+    def _resolve_service_messages(
+        self,
+        *,
+        manifest: MigrationManifest,
+        dialog: ManifestDialog,
+    ) -> bool:
+        if dialog.service_messages is not None:
+            return dialog.service_messages
+        return manifest.defaults.service_messages
 
     def _attachment_failure_payload(
         self,

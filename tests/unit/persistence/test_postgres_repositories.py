@@ -8,6 +8,7 @@ from sqlalchemy import BigInteger
 from extg_shared.contracts.models import (
     AuditEvent,
     AuditSeverity,
+    ChatMappingRecord,
     ClaimState,
     ConsumerInboxRecord,
     IntegrationOutboxEventRecord,
@@ -31,6 +32,7 @@ from extg_telethon_service.infrastructure.persistence.models import (
     OperatorTelegramSessionModel,
 )
 from extg_migration_runtime.infrastructure.persistence.repositories import (
+    PostgresChatMappingRepository,
     PostgresInboxRepository,
     PostgresInventorySnapshotRepository,
     PostgresMessageMappingRepository,
@@ -38,6 +40,7 @@ from extg_migration_runtime.infrastructure.persistence.repositories import (
     PostgresOutboxRepository,
 )
 from extg_migration_runtime.infrastructure.persistence.models import (
+    MigrationChatMapModel,
     MigrationInventorySnapshotModel,
 )
 from extg_telethon_service.infrastructure.persistence.repositories import (
@@ -160,6 +163,66 @@ def _build_model_with_raw_status(status: str):
         last_error_payload={"reason": "timeout"},
         created_at=datetime(2026, 3, 17, 10, 0, tzinfo=UTC),
         updated_at=datetime(2026, 3, 17, 10, 1, tzinfo=UTC),
+    )
+
+
+def _build_chat_mapping_record(
+    *,
+    migration_id: str = "migration-1",
+    source_chat_id: str = "chat-1",
+    source_chat_type: str = "supergroup",
+    source_chat_title: str = "Source Chat",
+    target_chat_id: str = "express-chat-1",
+    target_chat_title: str = "Target Chat",
+    status: str = "completed",
+    member_success_count: int | None = 10,
+    member_total_count: int | None = 12,
+):
+    now = datetime(2026, 3, 18, 12, 0, tzinfo=UTC)
+    return ChatMappingRecord(
+        migration_id=migration_id,
+        source_chat_id=source_chat_id,
+        source_chat_type=source_chat_type,
+        source_chat_title=source_chat_title,
+        target_chat_id=target_chat_id,
+        target_chat_title=target_chat_title,
+        status=status,
+        created_at=now,
+        updated_at=now,
+        anchor_cts_host="host",
+        anchor_bot_id="bot-id",
+        member_success_count=member_success_count,
+        member_total_count=member_total_count,
+    )
+
+
+def _build_chat_mapping_model(
+    *,
+    migration_id: str = "migration-1",
+    source_chat_id: str = "chat-1",
+    source_chat_type: str = "supergroup",
+    source_chat_title: str = "Source Chat",
+    target_chat_id: str = "express-chat-1",
+    target_chat_title: str = "Target Chat",
+    status: str = "completed",
+    member_success_count: int | None = 10,
+    member_total_count: int | None = 12,
+):
+    now = datetime(2026, 3, 18, 12, 0, tzinfo=UTC)
+    return MigrationChatMapModel(
+        migration_id=migration_id,
+        source_chat_id=source_chat_id,
+        source_chat_type=source_chat_type,
+        source_chat_title=source_chat_title,
+        target_chat_id=target_chat_id,
+        target_chat_title=target_chat_title,
+        status=status,
+        created_at=now,
+        updated_at=now,
+        anchor_cts_host="host",
+        anchor_bot_id="bot-id",
+        member_success_count=member_success_count,
+        member_total_count=member_total_count,
     )
 
 
@@ -851,6 +914,26 @@ async def test_inmemory_inventory_snapshot_repo_upserts():
     assert second.message_count == 20
     listed = await repository.list_by_migration("migration-1")
     assert len(listed) == 1
+
+
+@pytest.mark.asyncio
+async def test_postgres_chat_mapping_repo_lists_by_migration():
+    models = [
+        _build_chat_mapping_model(source_chat_id="chat-2", source_chat_title="Second"),
+        _build_chat_mapping_model(source_chat_id="chat-1", source_chat_title="First"),
+    ]
+    session = _FakeSession([models])
+    repository = PostgresChatMappingRepository(_SessionFactory(session))
+
+    listed = await repository.list_by_migration("migration-1")
+
+    listed_by_chat = {record.source_chat_id: record for record in listed}
+
+    assert set(listed_by_chat) == {"chat-1", "chat-2"}
+    assert listed_by_chat["chat-1"] == _build_chat_mapping_record(
+        source_chat_id="chat-1",
+        source_chat_title="First",
+    )
 
 
 @pytest.mark.asyncio

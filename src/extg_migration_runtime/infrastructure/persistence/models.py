@@ -40,6 +40,8 @@ class MigrationChatMapModel(Base):
     target_chat_id: Mapped[str] = mapped_column(String(128), nullable=False)
     target_chat_title: Mapped[str] = mapped_column(String(512), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    member_success_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    member_total_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -88,7 +90,10 @@ class MigrationChatConfigModel(Base):
     include_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     include_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     migrate_media: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    media_kinds_json: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    service_messages: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     reply_mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     identity_policy: Mapped[str] = mapped_column(String(64), nullable=False)
     access_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="direct_add")
     topic_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="single_chat")
@@ -98,6 +103,48 @@ class MigrationChatConfigModel(Base):
     source_thread_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_thread_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     updated_by_huid: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(tz=UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(tz=UTC),
+    )
+
+
+class MigrationOperatorDefaultsModel(Base):
+    __tablename__ = "migration_operator_defaults"
+    __table_args__ = (
+        UniqueConstraint(
+            "migration_id",
+            "operator_huid",
+            name="uq_migration_operator_defaults_key",
+        ),
+        Index(
+            "ix_migration_operator_defaults_migration_id",
+            "migration_id",
+        ),
+        CheckConstraint(
+            "include_from IS NULL OR include_to IS NULL OR include_from <= include_to",
+            name="ck_migration_operator_defaults_include_range",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    migration_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    operator_huid: Mapped[str] = mapped_column(String(128), nullable=False)
+    include_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    include_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    migrate_media: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    media_kinds_json: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    service_messages: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    reply_mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    access_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="direct_add")
+    topic_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="single_chat")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -5,6 +5,8 @@ from enum import Enum, auto
 from pybotx import Bot, IncomingMessage
 from pybotx_fsm import FSMCollector
 
+from extg_bot_ui.presentation.bot.menus import show_connected_menu
+from extg_bot_ui.presentation.bot.screen import current_screen_payload, render_screen
 from extg_telethon_service.application.telegram_session_service import (
     TelegramConnectionChallengeResult,
     TelegramPasswordChallengeResult,
@@ -58,7 +60,7 @@ def build_telegram_session_wizard_collector(
             await _cancel(message, bot)
             return
         if not choice:
-            await _reply(bot, "Введи код из Telegram или `cancel`.")
+            await _reply(message, bot, "Введите код из Telegram или отправьте `/cancel`.")
             return
         try:
             result = await service.complete_code(
@@ -67,21 +69,27 @@ def build_telegram_session_wizard_collector(
                 code=choice,
             )
         except USER_VISIBLE_SESSION_ERRORS as error:
-            await _reply(bot, f"Ошибка: {error}")
+            await _reply(message, bot, f"Ошибка: {error}")
             return
         if isinstance(result, TelegramPasswordChallengeResult):
             await message.state.fsm.change_state(
                 TelegramSessionWizardState.INPUT_PASSWORD,
                 ttl_seconds=TELEGRAM_SESSION_WIZARD_TTL_SECONDS,
                 challenge_id=result.challenge_id,
+                **current_screen_payload(message),
             )
             await _reply(
+                message,
                 bot,
-                "Для этого аккаунта включен Telegram 2FA. Отправь пароль следующим сообщением или `cancel`.",
+                "Для этого аккаунта включен Telegram 2FA. Отправьте пароль следующим сообщением или `/cancel`.",
             )
             return
         await message.state.fsm.drop_state()
-        await _reply(bot, _format_connected_status(result))
+        await show_connected_menu(
+            bot,
+            message=message,
+            notice="Вы успешно авторизовались в Telegram.",
+        )
 
     @fsm.on(TelegramSessionWizardState.INPUT_PASSWORD)
     async def input_password(message: IncomingMessage, bot: Bot) -> None:
@@ -90,7 +98,7 @@ def build_telegram_session_wizard_collector(
             await _cancel(message, bot)
             return
         if not body:
-            await _reply(bot, "Введи пароль Telegram 2FA или `cancel`.")
+            await _reply(message, bot, "Введите пароль Telegram 2FA или отправьте `/cancel`.")
             return
         try:
             result = await service.complete_password(
@@ -99,10 +107,14 @@ def build_telegram_session_wizard_collector(
                 password=body,
             )
         except USER_VISIBLE_SESSION_ERRORS as error:
-            await _reply(bot, f"Ошибка: {error}")
+            await _reply(message, bot, f"Ошибка: {error}")
             return
         await message.state.fsm.drop_state()
-        await _reply(bot, _format_connected_status(result))
+        await show_connected_menu(
+            bot,
+            message=message,
+            notice="Вы успешно авторизовались в Telegram.",
+        )
 
     return fsm
 
@@ -119,10 +131,12 @@ async def begin_telegram_connection(
         await message.state.fsm.change_state(
             TelegramSessionWizardState.INPUT_PHONE,
             ttl_seconds=TELEGRAM_SESSION_WIZARD_TTL_SECONDS,
+            **current_screen_payload(message),
         )
         await _reply(
+            message,
             bot,
-            "Отправь номер телефона в формате Telegram, например `+79990001122`, или `cancel`.",
+            "Отправьте номер телефона в формате Telegram, например `+79990001122`, или `/cancel`.",
         )
         return
 
@@ -132,7 +146,7 @@ async def begin_telegram_connection(
             phone_number=normalized_phone,
         )
     except USER_VISIBLE_SESSION_ERRORS as error:
-        await _reply(bot, f"Ошибка: {error}")
+        await _reply(message, bot, f"Ошибка: {error}")
         return
 
     if isinstance(result, TelegramConnectionChallengeResult):
@@ -140,35 +154,43 @@ async def begin_telegram_connection(
             TelegramSessionWizardState.INPUT_CODE,
             ttl_seconds=TELEGRAM_SESSION_WIZARD_TTL_SECONDS,
             challenge_id=result.challenge_id,
+            **current_screen_payload(message),
         )
         await _reply(
+            message,
             bot,
-            "Код отправлен в Telegram. Отправь его следующим сообщением или `cancel`.",
+            "Код отправлен в Telegram. Отправьте его следующим сообщением или `/cancel`.",
         )
         return
 
     await message.state.fsm.drop_state()
-    await _reply(bot, _format_connected_status(result))
+    await show_connected_menu(
+        bot,
+        message=message,
+        notice="Вы успешно авторизовались в Telegram.",
+    )
 
 
 def _format_connected_status(result: TelegramSessionStatusResult) -> str:
+    if not result.connected:
+        return "Учетная запись Telegram не подключена."
     return (
-        "Telegram session connected.\n"
-        f"source={result.source}\n"
-        f"phone_number={result.phone_number or '-'}\n"
-        f"telegram_user_id={result.telegram_user_id or '-'}\n"
-        f"telegram_username={result.telegram_username or '-'}\n"
-        f"telegram_display_name={result.telegram_display_name or '-'}"
+        "Учетная запись Telegram подключена.\n"
+        f"Источник: {result.source}\n"
+        f"Номер телефона: {result.phone_number or '-'}\n"
+        f"Telegram user id: {result.telegram_user_id or '-'}\n"
+        f"Telegram username: {('@' + result.telegram_username) if result.telegram_username else '-'}\n"
+        f"Имя в Telegram: {result.telegram_display_name or '-'}"
     )
 
 
 async def _cancel(message: IncomingMessage, bot: Bot) -> None:
     await message.state.fsm.drop_state()
-    await _reply(bot, "Flow подключения Telegram остановлен.")
+    await _reply(message, bot, "Подключение Telegram остановлено.")
 
 
-async def _reply(bot: Bot, body: str) -> None:
-    await bot.answer_message(body, wait_callback=False)
+async def _reply(message: IncomingMessage, bot: Bot, body: str) -> None:
+    await render_screen(message=message, bot=bot, body=body)
 
 
 def _normalized_body(message: IncomingMessage) -> str:

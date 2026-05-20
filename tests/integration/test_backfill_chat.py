@@ -990,6 +990,63 @@ async def test_backfill_skips_media_when_manifest_disables_it():
 
 
 @pytest.mark.asyncio
+async def test_backfill_skips_attachment_when_media_kind_is_not_selected():
+    manifest = MigrationManifest.model_validate(
+        {
+            "migration_id": "migration-1",
+            "mode": "backfill_delta_cutover",
+            "defaults": {"migrate_media": True, "media_kinds": ["photo"]},
+            "dialogs": [
+                {
+                    "source_chat_id": "chat-1",
+                    "source_chat_type": "supergroup",
+                    "target_strategy": "create",
+                    "target_title": "Imported Chat",
+                },
+            ],
+        },
+    )
+    dialog = SourceDialog(dialog_id="chat-1", chat_type="supergroup", title="Telegram Project Chat")
+    attachment = CanonicalAttachment(
+        source_file_id="file-1",
+        filename="document.txt",
+        mime_type="text/plain",
+        size_bytes=12,
+        media_kind="document",
+        download_url="fake://attachment/1",
+    )
+    repositories = (
+        InMemoryChatMappingRepository(),
+        InMemoryMessageMappingRepository(),
+        InMemoryAttachmentMappingRepository(),
+        InMemoryCheckpointRepository(),
+        InMemoryAuditRepository(),
+    )
+    telegram_gateway = FakeTelegramGateway(
+        dialogs=[dialog],
+        messages_by_dialog={"chat-1": [build_message("1", 0, attachments=[attachment])]},
+    )
+    express_gateway = FakeExpressGateway()
+    use_case = build_use_case(telegram_gateway, express_gateway, repositories)
+
+    result = await use_case.execute(
+        BackfillChatCommand(manifest=manifest, source_chat_id="chat-1", batch_size=10),
+    )
+
+    sent_messages = express_gateway.messages_for_chat(result.target_chat_id)
+    audit_events = await repositories[4].list_all()
+
+    assert result.imported_count == 1
+    assert telegram_gateway.download_calls == 0
+    assert sent_messages[0].file_filename is None
+    assert any(
+        event.event_type == "attachment_skipped_by_policy"
+        and event.payload_json.get("reason") == "attachment media kind is disabled by manifest"
+        for event in audit_events
+    )
+
+
+@pytest.mark.asyncio
 async def test_backfill_skips_attachment_above_express_size_limit_before_download():
     manifest = build_manifest()
     dialog = SourceDialog(dialog_id="chat-1", chat_type="supergroup", title="Telegram Project Chat")

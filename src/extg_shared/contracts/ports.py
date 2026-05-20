@@ -35,6 +35,7 @@ from extg_shared.contracts.models import (
     MigrationJobRecord,
     MigrationJobStatus,
     MigrationStateRecord,
+    OperatorMigrationDefaultsRecord,
     ObservedTelegramCapture,
     ObservedTelegramChatRecord,
     ObservedTelegramMessageRecord,
@@ -290,6 +291,12 @@ class ChatMappingRepository(Protocol):
     async def save(self, record: ChatMappingRecord) -> None:
         """Persist a chat mapping."""
 
+    async def list_by_migration(
+        self,
+        migration_id: str,
+    ) -> list[ChatMappingRecord]:
+        """List persisted chat mappings for one migration."""
+
 
 class ChatMigrationConfigRepository(Protocol):
     async def get(
@@ -317,6 +324,21 @@ class ChatMigrationConfigRepository(Protocol):
         source_chat_id: str,
     ) -> bool:
         """Delete one persisted chat migration config if it exists."""
+
+
+class OperatorMigrationDefaultsRepository(Protocol):
+    async def get(
+        self,
+        migration_id: str,
+        operator_huid: str,
+    ) -> OperatorMigrationDefaultsRecord | None:
+        """Fetch one persisted operator-level defaults profile."""
+
+    async def save(
+        self,
+        record: OperatorMigrationDefaultsRecord,
+    ) -> OperatorMigrationDefaultsRecord:
+        """Create or update one persisted operator-level defaults profile."""
 
 
 class MigrationJobRepository(Protocol):

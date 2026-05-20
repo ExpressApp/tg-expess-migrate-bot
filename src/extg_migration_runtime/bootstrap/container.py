@@ -113,6 +113,7 @@ from extg_migration_runtime.infrastructure.persistence.in_memory import (
     InMemoryInventorySnapshotRepository,
     InMemoryMessageMappingRepository,
     InMemoryMigrationJobRepository,
+    InMemoryOperatorMigrationDefaultsRepository,
     InMemoryMigrationStateRepository,
     InMemoryOutboxRepository,
     InMemoryServiceWatermarkRepository,
@@ -131,6 +132,7 @@ from extg_migration_runtime.infrastructure.persistence.repositories import (
     PostgresInventorySnapshotRepository,
     PostgresMessageMappingRepository,
     PostgresMigrationJobRepository,
+    PostgresOperatorMigrationDefaultsRepository,
     PostgresMigrationStateRepository,
     PostgresOutboxRepository,
     PostgresServiceWatermarkRepository,
@@ -373,6 +375,14 @@ class MigrationRuntimeContainer(containers.DeclarativeContainer):
             session_factory=session_factory,
         ),
         in_memory=providers.Singleton(InMemoryChatMigrationConfigRepository),
+    )
+    operator_migration_defaults_repository = providers.Selector(
+        persistence_backend,
+        postgres=providers.Singleton(
+            PostgresOperatorMigrationDefaultsRepository,
+            session_factory=session_factory,
+        ),
+        in_memory=providers.Singleton(InMemoryOperatorMigrationDefaultsRepository),
     )
     message_mapping_repository = providers.Selector(
         persistence_backend,
@@ -803,6 +813,7 @@ class MigrationRuntimeContainer(containers.DeclarativeContainer):
         resume_delta_use_case=resume_delta_use_case,
         chat_mapping_repository=chat_mapping_repository,
         chat_migration_config_repository=chat_migration_config_repository,
+        operator_migration_defaults_repository=operator_migration_defaults_repository,
         checkpoint_repository=checkpoint_repository,
         message_mapping_repository=message_mapping_repository,
         migration_state_repository=migration_state_repository,

@@ -143,7 +143,9 @@ class MessageDeliveryService:
         source_chat_title: str | None,
         reply_preview: ReplyPreview | None,
         migrate_media: bool,
+        media_kinds: tuple[str, ...] | None = None,
         reply_mode: str = "inline_quote",
+        output_template: str | None = None,
         existing_primary_message: SentMessageRef | None = None,
         existing_rendered_body: str | None = None,
         retry_failed_attachments: bool = False,
@@ -154,6 +156,7 @@ class MessageDeliveryService:
             canonical=canonical,
             source_backend=source_backend,
             migrate_media=migrate_media,
+            media_kinds=media_kinds,
             target_chat_id=target_chat_id,
             reuse_existing_primary=existing_primary_message is not None,
             prefetched_attachments=prefetched_attachments,
@@ -185,6 +188,7 @@ class MessageDeliveryService:
                     source_chat_title=source_chat_title,
                     reply_preview=reply_preview,
                     reply_mode=reply_mode,
+                    output_template=output_template,
                 )
                 rendered_body = rendered.render_text()
                 try:
@@ -238,6 +242,7 @@ class MessageDeliveryService:
                     source_chat_title=source_chat_title,
                     reply_preview=reply_preview,
                     reply_mode=reply_mode,
+                    output_template=output_template,
                 ).render_text()
                 sent_message = existing_primary_message
                 primary_reused = True
@@ -295,12 +300,19 @@ class MessageDeliveryService:
         canonical: CanonicalMessage,
         source_backend: str,
         migrate_media: bool,
+        media_kinds: tuple[str, ...] | None = None,
     ) -> tuple[PrefetchedAttachment, ...]:
         if not migrate_media or not canonical.attachments:
             return ()
 
+        allowed_media_kinds = self._normalized_media_kinds(media_kinds)
         prefetched: list[PrefetchedAttachment] = []
         for attachment_index, attachment in enumerate(canonical.attachments):
+            if not self._is_attachment_media_kind_allowed(
+                attachment=attachment,
+                allowed_media_kinds=allowed_media_kinds,
+            ):
+                continue
             limit_reason = self._attachment_size_limit_reason(
                 attachment=attachment,
                 size_bytes=attachment.size_bytes,
@@ -379,6 +391,7 @@ class MessageDeliveryService:
         canonical: CanonicalMessage,
         source_backend: str,
         migrate_media: bool,
+        media_kinds: tuple[str, ...] | None,
         target_chat_id: str,
         reuse_existing_primary: bool,
         prefetched_attachments: tuple[PrefetchedAttachment, ...] | None = None,
@@ -393,6 +406,7 @@ class MessageDeliveryService:
             item.attachment_index: item
             for item in (prefetched_attachments or ())
         }
+        allowed_media_kinds = self._normalized_media_kinds(media_kinds)
 
         if not migrate_media:
             for attachment_index, attachment in enumerate(canonical.attachments):
@@ -453,6 +467,24 @@ class MessageDeliveryService:
                 if not existing_outcome.blocks_message_completion:
                     outcomes_by_index[attachment_index] = existing_outcome
                     continue
+            if not self._is_attachment_media_kind_allowed(
+                attachment=attachment,
+                allowed_media_kinds=allowed_media_kinds,
+            ):
+                record = await self._mark_attachment_skipped_by_policy(
+                    migration_id=migration_id,
+                    canonical=canonical,
+                    attachment_index=attachment_index,
+                    attachment=attachment,
+                    target_chat_id=target_chat_id,
+                    reason="attachment media kind is disabled by manifest",
+                    policy="manifest_media_kinds",
+                )
+                outcomes_by_index[attachment_index] = self._outcome_from_record(
+                    attachment=attachment,
+                    record=record,
+                )
+                continue
             if prefetched is not None and prefetched.skipped_reason is not None:
                 limit_reason = prefetched.skipped_reason
             else:
@@ -462,13 +494,17 @@ class MessageDeliveryService:
                 )
             if limit_reason is not None:
                 failures.append(limit_reason)
-                record = await self._mark_attachment_skipped(
+                record = await self._mark_attachment_skipped_by_policy(
                     migration_id=migration_id,
                     canonical=canonical,
                     attachment_index=attachment_index,
                     attachment=attachment,
                     target_chat_id=target_chat_id,
                     reason=limit_reason,
+                    policy="express_botx_max_upload_size",
+                    extra_audit_payload={
+                        "size_limit_bytes": self._max_attachment_upload_size_bytes,
+                    },
                 )
                 outcomes_by_index[attachment_index] = self._outcome_from_record(
                     attachment=attachment,
@@ -557,7 +593,7 @@ class MessageDeliveryService:
             if limit_reason is not None:
                 failures.append(limit_reason)
                 self._cleanup_downloaded_attachment(downloaded_attachment)
-                record = await self._mark_attachment_skipped(
+                record = await self._mark_attachment_skipped_by_policy(
                     migration_id=migration_id,
                     canonical=canonical,
                     attachment_index=attachment_index,
@@ -567,6 +603,10 @@ class MessageDeliveryService:
                     ),
                     target_chat_id=target_chat_id,
                     reason=limit_reason,
+                    policy="express_botx_max_upload_size",
+                    extra_audit_payload={
+                        "size_limit_bytes": self._max_attachment_upload_size_bytes,
+                    },
                 )
                 outcomes_by_index[attachment_index] = self._outcome_from_record(
                     attachment=attachment,
@@ -639,7 +679,7 @@ class MessageDeliveryService:
             )
             if limit_reason is not None:
                 failures.append(limit_reason)
-                record = await self._mark_attachment_skipped(
+                record = await self._mark_attachment_skipped_by_policy(
                     migration_id=migration_id,
                     canonical=canonical,
                     attachment_index=attachment_index,
@@ -649,6 +689,10 @@ class MessageDeliveryService:
                     ),
                     target_chat_id=target_chat_id,
                     reason=limit_reason,
+                    policy="express_botx_max_upload_size",
+                    extra_audit_payload={
+                        "size_limit_bytes": self._max_attachment_upload_size_bytes,
+                    },
                 )
                 outcomes_by_index[attachment_index] = self._outcome_from_record(
                     attachment=attachment,
@@ -1405,7 +1449,7 @@ class MessageDeliveryService:
             f"{self._format_size_bytes(self._max_attachment_upload_size_bytes)})"
         )
 
-    async def _mark_attachment_skipped(
+    async def _mark_attachment_skipped_by_policy(
         self,
         *,
         migration_id: str,
@@ -1414,6 +1458,8 @@ class MessageDeliveryService:
         attachment: CanonicalAttachment,
         target_chat_id: str,
         reason: str,
+        policy: str,
+        extra_audit_payload: dict[str, object] | None = None,
     ) -> AttachmentMappingRecord:
         record = await self._claim_terminal_attachment(
             migration_id=migration_id,
@@ -1440,15 +1486,15 @@ class MessageDeliveryService:
                 severity=AuditSeverity.INFO,
                 payload_json={
                     **self._attachment_payload(attachment, reason=reason),
-                    "policy": "express_botx_max_upload_size",
-                    "size_limit_bytes": self._max_attachment_upload_size_bytes,
+                    "policy": policy,
+                    **(extra_audit_payload or {}),
                 },
                 created_at=self._now(),
             ),
         )
         self._log(
             "info",
-            "attachment skipped by size limit",
+            "attachment skipped by policy",
             migration_id=migration_id,
             source_chat_id=canonical.source_chat_id,
             source_message_id=canonical.source_message_id,
@@ -1457,9 +1503,40 @@ class MessageDeliveryService:
             media_kind=attachment.media_kind,
             filename=attachment.filename,
             size_bytes=attachment.size_bytes,
-            size_limit_bytes=self._max_attachment_upload_size_bytes,
+            reason=reason,
+            policy=policy,
         )
         return record
+
+    def _normalized_media_kinds(
+        self,
+        media_kinds: tuple[str, ...] | None,
+    ) -> frozenset[str] | None:
+        if media_kinds is None:
+            return None
+        return frozenset(
+            normalized
+            for kind in media_kinds
+            if (normalized := kind.strip().lower())
+        )
+
+    def _is_attachment_media_kind_allowed(
+        self,
+        *,
+        attachment: CanonicalAttachment,
+        allowed_media_kinds: frozenset[str] | None,
+    ) -> bool:
+        if allowed_media_kinds is None:
+            return True
+        return self._normalized_attachment_media_kind(attachment.media_kind) in allowed_media_kinds
+
+    def _normalized_attachment_media_kind(self, media_kind: str | None) -> str:
+        normalized = (media_kind or "file").strip().lower()
+        if normalized in {"document", "audio", "file"}:
+            return "file"
+        if normalized == "sticker":
+            return "photo"
+        return normalized
 
     async def _claim_terminal_attachment(
         self,
@@ -1727,6 +1804,7 @@ class MessageDeliveryService:
         return {
             "photo": ".jpg",
             "video": ".mp4",
+            "video_note": ".mp4",
             "voice": ".ogg",
             "audio": ".mp3",
             "sticker": ".webp",
