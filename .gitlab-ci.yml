@@ -348,7 +348,7 @@ deploy.botsprod:
   variables:
     GIT_STRATEGY: none
   rules:
-    - if: $CI_COMMIT_BRANCH == "master"
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "dev"'
   when: manual
   environment:
     name: production
